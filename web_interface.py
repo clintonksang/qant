@@ -347,7 +347,29 @@ class WebTradingAnalyzer:
             print(f"DataFrame index: {type(df.index)}")
             print(f"DataFrame shape: {df.shape}")
 
-            # Prepare data for analysis
+            # Get current price from the MOST RECENT candle in the original dataframe
+            # (before slicing for analysis)
+            current_price = None
+            last_timestamp_str = None
+            last_timestamp_utc3_str = None
+            if not df.empty:
+                last_row_original = df.iloc[-1]
+                try:
+                    current_price = float(last_row_original["Close"])
+                except Exception:
+                    current_price = None
+
+                try:
+                    last_dt = pd.to_datetime(last_row_original["Datetime"])
+                    last_timestamp_str = last_dt.strftime("%Y-%m-%d %H:%M:%S")
+                    # Assume source timestamps are effectively UTC and convert to UTC+3 for display
+                    last_dt_utc3 = last_dt + timedelta(hours=3)
+                    last_timestamp_utc3_str = last_dt_utc3.strftime("%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    last_timestamp_str = None
+                    last_timestamp_utc3_str = None
+
+            # Prepare data for analysis (exclude last 3 candles for LLM analysis)
             if len(df) > 49:
                 df_slice = df.tail(49).iloc[:-3]
             else:
@@ -363,27 +385,6 @@ class WebTradingAnalyzer:
 
             # Reset index to avoid any MultiIndex issues
             df_slice = df_slice.reset_index(drop=True)
-
-            # Derive basic price/time info for the most recent candle
-            current_price = None
-            last_timestamp_str = None
-            last_timestamp_utc3_str = None
-            if not df_slice.empty:
-                last_row = df_slice.iloc[-1]
-                try:
-                    current_price = float(last_row["Close"])
-                except Exception:
-                    current_price = None
-
-                try:
-                    last_dt = pd.to_datetime(last_row["Datetime"])
-                    last_timestamp_str = last_dt.strftime("%Y-%m-%d %H:%M:%S")
-                    # Assume source timestamps are effectively UTC and convert to UTC+3 for display
-                    last_dt_utc3 = last_dt + timedelta(hours=3)
-                    last_timestamp_utc3_str = last_dt_utc3.strftime("%Y-%m-%d %H:%M:%S")
-                except Exception:
-                    last_timestamp_str = None
-                    last_timestamp_utc3_str = None
 
             # Debug: Check the slice before conversion
             print(f"Slice columns: {df_slice.columns}")
