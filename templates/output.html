@@ -509,6 +509,32 @@
                              </div>
                          </div>
                      </div>
+                     <div class="row align-items-stretch mt-3">
+                         <div class="col-md-6 d-flex">
+                             <div class="stats-card w-100">
+                                 <div class="stats-number">
+                                     {% if results.current_price %}
+                                         {{ '%.4f'|format(results.current_price) }}
+                                     {% else %}
+                                         N/A
+                                     {% endif %}
+                                 </div>
+                                 <div class="stats-label">Current Price</div>
+                             </div>
+                         </div>
+                         <div class="col-md-6 d-flex">
+                             <div class="stats-card w-100">
+                                 <div class="stats-number">
+                                     {% if results.signal_confidence %}
+                                         {{ results.signal_confidence }}
+                                     {% else %}
+                                         Unknown
+                                     {% endif %}
+                                 </div>
+                                 <div class="stats-label">Signal Confidence</div>
+                             </div>
+                         </div>
+                     </div>
                  </div>
                  
                  <!-- Final Decision Panel -->
@@ -527,6 +553,12 @@
                          {% if results.final_decision %}
                              <p><strong>Forecast Horizon:</strong> {{ results.final_decision.forecast_horizon if results.final_decision.forecast_horizon else '24-48 hours' }}</p>
                              <p><strong>Risk/Reward Ratio:</strong> {{ results.final_decision.risk_reward_ratio if results.final_decision.risk_reward_ratio else '1:2.5' }}</p>
+                             {% if results.last_timestamp_utc3 %}
+                                 <p><strong>Last Candle Time (UTC+3):</strong> {{ results.last_timestamp_utc3 }}</p>
+                             {% endif %}
+                             {% if results.signal_confidence %}
+                                 <p><strong>Signal Confidence:</strong> {{ results.signal_confidence }}</p>
+                             {% endif %}
                              <p><strong>Justification:</strong></p>
                              <p>{{ results.final_decision.justification if results.final_decision.justification else 'Based on comprehensive analysis of technical indicators, pattern recognition, and trend analysis, the system recommends a LONG position on BTC. The analysis shows strong bullish momentum with key support levels holding, and multiple technical indicators confirming upward movement.' }}</p>
                          {% else %}
@@ -536,6 +568,58 @@
                              <p>Based on comprehensive analysis of technical indicators, pattern recognition, and trend analysis, the system recommends a LONG position on BTC. The analysis shows strong bullish momentum with key support levels holding, and multiple technical indicators confirming upward movement.</p>
                          {% endif %}
                      </div>
+                 </div>
+                 
+                 <!-- Position & Return Calculator -->
+                 <div class="panel">
+                     <h4 class="panel-title">
+                         <i class="fas fa-calculator"></i> Position & Return Calculator
+                     </h4>
+                     <div class="row">
+                         <div class="col-md-4">
+                             <div class="form-group">
+                                 <label for="positionAmount" class="form-label"><strong>Position Size (Amount)</strong></label>
+                                 <input type="number" class="form-control" id="positionAmount" placeholder="e.g., 1000" min="0" step="0.01">
+                             </div>
+                         </div>
+                         <div class="col-md-4">
+                             <div class="form-group">
+                                 <label for="targetPrice" class="form-label"><strong>Expected Target Price</strong></label>
+                                 <input type="number" class="form-control" id="targetPrice" placeholder="e.g., 2500.00" min="0" step="0.0001">
+                             </div>
+                         </div>
+                         <div class="col-md-4">
+                             <div class="form-group">
+                                 <label class="form-label"><strong>Current Price</strong></label>
+                                 <p id="currentPriceDisplay">
+                                     {% if results.current_price %}
+                                         {{ '%.4f'|format(results.current_price) }}
+                                     {% else %}
+                                         N/A
+                                     {% endif %}
+                                 </p>
+                             </div>
+                         </div>
+                     </div>
+                     <div class="row mt-3">
+                         <div class="col-md-6">
+                             <div class="form-group">
+                                 <label class="form-label"><strong>Expected Return (%)</strong></label>
+                                 <p id="expectedReturnPercent">—</p>
+                             </div>
+                         </div>
+                         <div class="col-md-6">
+                             <div class="form-group">
+                                 <label class="form-label"><strong>Expected Profit (Amount)</strong></label>
+                                 <p id="expectedProfitAmount">—</p>
+                             </div>
+                         </div>
+                     </div>
+                     {% if results.last_timestamp_utc3 %}
+                         <div class="mt-3">
+                             <p><strong>Last Candle Time (UTC+3):</strong> {{ results.last_timestamp_utc3 }}</p>
+                         </div>
+                     {% endif %}
                  </div>
                  
                                  <!-- Technical Indicators Panel -->
@@ -599,13 +683,18 @@
                         <h4 class="panel-title">
                             <i class="fas fa-chart-bar"></i> Pattern Visualization
                         </h4>
-                        <div class="image-container">
-                            {% if results.pattern_chart %}
-                                <img src="data:image/png;base64,{{ results.pattern_chart }}" alt="Pattern Analysis Chart" class="analysis-image">
-                            {% else %}
-                                <img src="/api/images/pattern" alt="Pattern Analysis Chart" class="analysis-image">
-                            {% endif %}
-                            <p class="chart-caption">Desc Triangle Overlay</p>
+                        <div class="image-container" style="position: relative; min-height: 400px;">
+                            <!-- TradingView Widget Container -->
+                            <div id="pattern-chart-container" style="width: 100%; height: 400px;"></div>
+                            <!-- Fallback static image (hidden by default) -->
+                            <div id="pattern-chart-fallback" style="display: none;">
+                                {% if results.pattern_chart %}
+                                    <img src="data:image/png;base64,{{ results.pattern_chart }}" alt="Pattern Analysis Chart" class="analysis-image">
+                                {% else %}
+                                    <img src="/api/images/pattern" alt="Pattern Analysis Chart" class="analysis-image">
+                                {% endif %}
+                            </div>
+                            <p class="chart-caption">Interactive Candlestick Chart</p>
                         </div>
                     </div>
                 </div>
@@ -642,12 +731,17 @@
                             <h4 class="panel-title">
                                 <i class="fas fa-chart-line"></i> Trend Visualization
                             </h4>
-                            <div class="image-container">
-                                {% if results.trend_chart %}
-                                    <img src="data:image/png;base64,{{ results.trend_chart }}" alt="Trend Analysis Chart" class="analysis-image">
-                                {% else %}
-                                    <img src="/api/images/trend" alt="Trend Analysis Chart" class="analysis-image">
-                                {% endif %}
+                            <div class="image-container" style="position: relative; min-height: 400px;">
+                                <!-- TradingView Widget Container -->
+                                <div id="trend-chart-container" style="width: 100%; height: 400px;"></div>
+                                <!-- Fallback static image (hidden by default) -->
+                                <div id="trend-chart-fallback" style="display: none;">
+                                    {% if results.trend_chart %}
+                                        <img src="data:image/png;base64,{{ results.trend_chart }}" alt="Trend Analysis Chart" class="analysis-image">
+                                    {% else %}
+                                        <img src="/api/images/trend" alt="Trend Analysis Chart" class="analysis-image">
+                                    {% endif %}
+                                </div>
                                 <p class="chart-caption">Support & Resistance Lines</p>
                             </div>
                         </div>
@@ -661,7 +755,202 @@
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <!-- TradingView Lightweight Charts Library -->
+    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
     <script>
+        // TradingView Chart Data from Backend
+        const chartData = {
+            symbol: '{{ results.tradingview_symbol if results.tradingview_symbol else "BINANCE:BTCUSDT" }}',
+            timeframe: '{{ results.timeframe if results.timeframe else "1h" }}',
+            data: {{ results.tradingview_data | tojson if results.tradingview_data else "[]" }},
+            supportLines: {{ results.support_lines | tojson if results.support_lines else "[]" }},
+            resistanceLines: {{ results.resistance_lines | tojson if results.resistance_lines else "[]" }},
+            patternChartFallback: {% if results.pattern_chart %}true{% else %}false{% endif %},
+            trendChartFallback: {% if results.trend_chart %}true{% else %}false{% endif %}
+        };
+
+        // Initialize TradingView Charts
+        function initTradingViewCharts() {
+            // Initialize Pattern Chart
+            if (chartData.data && chartData.data.length > 0) {
+                initPatternChart();
+                initTrendChart();
+            } else {
+                // Fallback to static images if no data
+                showFallbackImages();
+            }
+        }
+
+        function initPatternChart() {
+            const container = document.getElementById('pattern-chart-container');
+            if (!container || !chartData.data || chartData.data.length === 0) {
+                showPatternFallback();
+                return;
+            }
+
+            try {
+                // Create chart using TradingView Lightweight Charts
+                const chart = LightweightCharts.createChart(container, {
+                    width: container.clientWidth,
+                    height: 400,
+                    layout: {
+                        background: { color: '#ffffff' },
+                        textColor: '#333',
+                    },
+                    grid: {
+                        vertLines: { color: '#f0f0f0' },
+                        horzLines: { color: '#f0f0f0' },
+                    },
+                    timeScale: {
+                        timeVisible: true,
+                        secondsVisible: false,
+                    },
+                });
+
+                // Add candlestick series
+                const candlestickSeries = chart.addCandlestickSeries({
+                    upColor: '#26a69a',
+                    downColor: '#ef5350',
+                    borderVisible: false,
+                    wickUpColor: '#26a69a',
+                    wickDownColor: '#ef5350',
+                });
+
+                // Convert data format: [timestamp_ms, open, high, low, close, volume] to {time, open, high, low, close}
+                const formattedData = chartData.data.map(item => ({
+                    time: Math.floor(item[0] / 1000), // Convert ms to seconds
+                    open: item[1],
+                    high: item[2],
+                    low: item[3],
+                    close: item[4],
+                }));
+
+                candlestickSeries.setData(formattedData);
+                chart.timeScale().fitContent();
+
+                // Handle window resize
+                window.addEventListener('resize', () => {
+                    chart.applyOptions({ width: container.clientWidth });
+                });
+            } catch (e) {
+                console.error('Error initializing pattern chart:', e);
+                showPatternFallback();
+            }
+        }
+
+        function initTrendChart() {
+            const container = document.getElementById('trend-chart-container');
+            if (!container || !chartData.data || chartData.data.length === 0) {
+                showTrendFallback();
+                return;
+            }
+
+            try {
+                // Create chart using TradingView Lightweight Charts
+                const chart = LightweightCharts.createChart(container, {
+                    width: container.clientWidth,
+                    height: 400,
+                    layout: {
+                        background: { color: '#ffffff' },
+                        textColor: '#333',
+                    },
+                    grid: {
+                        vertLines: { color: '#f0f0f0' },
+                        horzLines: { color: '#f0f0f0' },
+                    },
+                    timeScale: {
+                        timeVisible: true,
+                        secondsVisible: false,
+                    },
+                });
+
+                // Add candlestick series
+                const candlestickSeries = chart.addCandlestickSeries({
+                    upColor: '#26a69a',
+                    downColor: '#ef5350',
+                    borderVisible: false,
+                    wickUpColor: '#26a69a',
+                    wickDownColor: '#ef5350',
+                });
+
+                // Convert data format
+                const formattedData = chartData.data.map(item => ({
+                    time: Math.floor(item[0] / 1000),
+                    open: item[1],
+                    high: item[2],
+                    low: item[3],
+                    close: item[4],
+                }));
+
+                candlestickSeries.setData(formattedData);
+
+                // Add support lines
+                if (chartData.supportLines && chartData.supportLines.length > 0) {
+                    const supportLine = chart.addLineSeries({
+                        color: '#2196F3',
+                        lineWidth: 2,
+                        lineStyle: 0, // Solid
+                        title: 'Support',
+                    });
+                    const supportData = chartData.supportLines.map(item => ({
+                        time: Math.floor(item[0] / 1000),
+                        value: item[1],
+                    }));
+                    supportLine.setData(supportData);
+                }
+
+                // Add resistance lines
+                if (chartData.resistanceLines && chartData.resistanceLines.length > 0) {
+                    const resistanceLine = chart.addLineSeries({
+                        color: '#f44336',
+                        lineWidth: 2,
+                        lineStyle: 0, // Solid
+                        title: 'Resistance',
+                    });
+                    const resistanceData = chartData.resistanceLines.map(item => ({
+                        time: Math.floor(item[0] / 1000),
+                        value: item[1],
+                    }));
+                    resistanceLine.setData(resistanceData);
+                }
+
+                chart.timeScale().fitContent();
+
+                // Handle window resize
+                window.addEventListener('resize', () => {
+                    chart.applyOptions({ width: container.clientWidth });
+                });
+            } catch (e) {
+                console.error('Error initializing trend chart:', e);
+                showTrendFallback();
+            }
+        }
+
+
+
+        function showPatternFallback() {
+            const container = document.getElementById('pattern-chart-container');
+            const fallback = document.getElementById('pattern-chart-fallback');
+            if (container && fallback) {
+                container.style.display = 'none';
+                fallback.style.display = 'block';
+            }
+        }
+
+        function showTrendFallback() {
+            const container = document.getElementById('trend-chart-container');
+            const fallback = document.getElementById('trend-chart-fallback');
+            if (container && fallback) {
+                container.style.display = 'none';
+                fallback.style.display = 'block';
+            }
+        }
+
+        function showFallbackImages() {
+            showPatternFallback();
+            showTrendFallback();
+        }
+
         // Check for full results in sessionStorage and update page
         document.addEventListener('DOMContentLoaded', function() {
             // Check if we have full results with images in sessionStorage
@@ -670,17 +959,25 @@
                 try {
                     const results = JSON.parse(fullResults);
                     
-                    // Update pattern chart if available
+                    // Update chart data if available
+                    if (results.tradingview_data) {
+                        chartData.data = results.tradingview_data;
+                        chartData.symbol = results.tradingview_symbol || chartData.symbol;
+                        chartData.supportLines = results.support_lines || [];
+                        chartData.resistanceLines = results.resistance_lines || [];
+                    }
+                    
+                    // Update pattern chart if available (fallback)
                     if (results.pattern_chart) {
-                        const patternImg = document.querySelector('img[alt="Pattern Analysis Chart"]');
+                        const patternImg = document.querySelector('#pattern-chart-fallback img');
                         if (patternImg) {
                             patternImg.src = `data:image/png;base64,${results.pattern_chart}`;
                         }
                     }
                     
-                    // Update trend chart if available
+                    // Update trend chart if available (fallback)
                     if (results.trend_chart) {
-                        const trendImg = document.querySelector('img[alt="Trend Analysis Chart"]');
+                        const trendImg = document.querySelector('#trend-chart-fallback img');
                         if (trendImg) {
                             trendImg.src = `data:image/png;base64,${results.trend_chart}`;
                         }
@@ -691,6 +988,72 @@
                 } catch (e) {
                     console.error('Error parsing sessionStorage results:', e);
                 }
+            }
+
+            // Initialize TradingView charts after page loads and data is ready
+            function initializeCharts() {
+                if (typeof LightweightCharts !== 'undefined') {
+                    initTradingViewCharts();
+                } else {
+                    // Wait for LightweightCharts script to load
+                    let attempts = 0;
+                    const checkLightweightCharts = setInterval(() => {
+                        attempts++;
+                        if (typeof LightweightCharts !== 'undefined') {
+                            clearInterval(checkLightweightCharts);
+                            initTradingViewCharts();
+                        } else if (attempts > 10) {
+                            clearInterval(checkLightweightCharts);
+                            console.error('TradingView LightweightCharts script failed to load');
+                            showFallbackImages();
+                        }
+                    }, 500);
+                }
+            }
+
+            // Small delay to ensure DOM is fully ready
+            setTimeout(initializeCharts, 100);
+        });
+        
+        // Position & return calculator
+        document.addEventListener('DOMContentLoaded', function () {
+            const positionInput = document.getElementById('positionAmount');
+            const targetInput = document.getElementById('targetPrice');
+            const expectedReturnEl = document.getElementById('expectedReturnPercent');
+            const expectedProfitEl = document.getElementById('expectedProfitAmount');
+
+            const currentPrice = parseFloat('{{ results.current_price if results.current_price else 0 }}');
+            const decisionDirection = '{{ results.final_decision.decision if results.final_decision and results.final_decision.decision else "LONG" }}';
+
+            function updateReturns() {
+                if (!positionInput || !targetInput || !expectedReturnEl || !expectedProfitEl) return;
+                
+                const amount = parseFloat(positionInput.value);
+                const targetPrice = parseFloat(targetInput.value);
+
+                if (!currentPrice || !amount || !targetPrice) {
+                    expectedReturnEl.textContent = '—';
+                    expectedProfitEl.textContent = '—';
+                    return;
+                }
+
+                let returnPct = 0;
+                if (decisionDirection.toUpperCase() === 'SHORT') {
+                    returnPct = ((currentPrice - targetPrice) / currentPrice) * 100.0;
+                } else {
+                    returnPct = ((targetPrice - currentPrice) / currentPrice) * 100.0;
+                }
+                const profitAmount = amount * (returnPct / 100.0);
+
+                expectedReturnEl.textContent = returnPct.toFixed(2) + ' %';
+                expectedProfitEl.textContent = profitAmount.toFixed(2);
+            }
+
+            if (positionInput) {
+                positionInput.addEventListener('input', updateReturns);
+            }
+            if (targetInput) {
+                targetInput.addEventListener('input', updateReturns);
             }
         });
         

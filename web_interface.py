@@ -2,10 +2,11 @@ import json
 import os
 import re
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict
 
+import numpy as np
 import pandas as pd
 import yfinance as yf
 from flask import Flask, jsonify, render_template, request, send_file
@@ -70,6 +71,35 @@ class WebTradingAnalyzer:
             "1d": "1d",
             "1w": "1wk",
             "1mo": "1mo",
+        }
+
+        # TradingView symbol mapping
+        self.tradingview_symbols = {
+            "SPX": "SPX",  # S&P 500
+            "BTC": "BINANCE:BTCUSDT",  # Bitcoin (using Binance for better data)
+            "GC": "COMEX:GC1!",  # Gold Futures
+            "NQ": "CME:NQ1!",  # Nasdaq Futures
+            "CL": "NYMEX:CL1!",  # Crude Oil
+            "ES": "CME:ES1!",  # E-mini S&P 500
+            "DJI": "DJI",  # Dow Jones
+            "QQQ": "NASDAQ:QQQ",  # Invesco QQQ Trust
+            "VIX": "CBOE:VIX",  # Volatility Index
+            "DXY": "TVC:DXY",  # US Dollar Index
+            "AAPL": "NASDAQ:AAPL",  # Apple Inc.
+            "TSLA": "NASDAQ:TSLA",  # Tesla Inc.
+        }
+
+        # TradingView timeframe mapping (in minutes)
+        self.tradingview_timeframes = {
+            "1m": "1",
+            "5m": "5",
+            "15m": "15",
+            "30m": "30",
+            "1h": "60",
+            "4h": "240",
+            "1d": "D",
+            "1w": "W",
+            "1mo": "M",
         }
 
         # Load persisted custom assets
@@ -232,6 +262,81 @@ class WebTradingAnalyzer:
         files = list(asset_dir.glob(pattern))
         return sorted(files)
 
+    def convert_to_tradingview_format(self, df: pd.DataFrame) -> list:
+        """
+        Convert pandas DataFrame to TradingView-compatible format.
+        Returns list of [timestamp_ms, open, high, low, close, volume] arrays.
+        """
+        if df.empty:
+            return []
+        
+        # Ensure Datetime column exists and is datetime type
+        if "Datetime" not in df.columns:
+            return []
+        
+        df_copy = df.copy()
+        df_copy["Datetime"] = pd.to_datetime(df_copy["Datetime"])
+        
+        # Convert to Unix timestamp in milliseconds
+        timestamps = (df_copy["Datetime"].astype("int64") // 10**6).tolist()
+        
+        # Build TradingView data format: [timestamp, open, high, low, close, volume]
+        tradingview_data = []
+        for i, (idx, row) in enumerate(df_copy.iterrows()):
+            volume = float(row.get("Volume", 0)) if "Volume" in df_copy.columns else 0
+            tradingview_data.append([
+                timestamps[i],
+                float(row["Open"]),
+                float(row["High"]),
+                float(row["Low"]),
+                float(row["Close"]),
+                volume
+            ])
+        
+        return tradingview_data
+
+    def extract_support_resistance_lines(self, df: pd.DataFrame) -> Dict[str, list]:
+        """
+        Extract support and resistance lines from DataFrame for TradingView overlay.
+        Returns dict with 'support' and 'resistance' arrays of [timestamp, price] pairs.
+        """
+        try:
+            from graph_util import fit_trendlines_high_low, fit_trendlines_single, get_line_points
+            
+            if df.empty or len(df) < 10:
+                return {"support": [], "resistance": []}
+            
+            df_copy = df.copy()
+            df_copy["Datetime"] = pd.to_datetime(df_copy["Datetime"])
+            df_copy.set_index("Datetime", inplace=True)
+            
+            # Use last 50 candles for trendline calculation
+            candles = df_copy.tail(50).copy()
+            
+            # Calculate trendlines
+            support_coefs_c, resist_coefs_c = fit_trendlines_single(candles["Close"])
+            support_coefs, resist_coefs = fit_trendlines_high_low(
+                candles["High"], candles["Low"], candles["Close"]
+            )
+            
+            # Generate line points
+            support_line_c = support_coefs_c[0] * np.arange(len(candles)) + support_coefs_c[1]
+            resist_line_c = resist_coefs_c[0] * np.arange(len(candles)) + resist_coefs_c[1]
+            
+            # Convert to timestamp-price pairs
+            timestamps = (candles.index.astype("int64") // 10**6).tolist()
+            
+            support_points = [[int(ts), float(price)] for ts, price in zip(timestamps, support_line_c)]
+            resistance_points = [[int(ts), float(price)] for ts, price in zip(timestamps, resist_line_c)]
+            
+            return {
+                "support": support_points,
+                "resistance": resistance_points
+            }
+        except Exception as e:
+            print(f"Error extracting support/resistance lines: {e}")
+            return {"support": [], "resistance": []}
+
     def run_analysis(
         self, df: pd.DataFrame, asset_name: str, timeframe: str
     ) -> Dict[str, Any]:
@@ -258,6 +363,27 @@ class WebTradingAnalyzer:
 
             # Reset index to avoid any MultiIndex issues
             df_slice = df_slice.reset_index(drop=True)
+
+            # Derive basic price/time info for the most recent candle
+            current_price = None
+            last_timestamp_str = None
+            last_timestamp_utc3_str = None
+            if not df_slice.empty:
+                last_row = df_slice.iloc[-1]
+                try:
+                    current_price = float(last_row["Close"])
+                except Exception:
+                    current_price = None
+
+                try:
+                    last_dt = pd.to_datetime(last_row["Datetime"])
+                    last_timestamp_str = last_dt.strftime("%Y-%m-%d %H:%M:%S")
+                    # Assume source timestamps are effectively UTC and convert to UTC+3 for display
+                    last_dt_utc3 = last_dt + timedelta(hours=3)
+                    last_timestamp_utc3_str = last_dt_utc3.strftime("%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    last_timestamp_str = None
+                    last_timestamp_utc3_str = None
 
             # Debug: Check the slice before conversion
             print(f"Slice columns: {df_slice.columns}")
@@ -308,12 +434,38 @@ class WebTradingAnalyzer:
             # Run the trading graph
             final_state = self.trading_graph.graph.invoke(initial_state)
 
+            # Derive a simple, heuristic confidence score for the signal
+            indicator_text = (final_state.get("indicator_report", "") or "").strip()
+            pattern_text = (final_state.get("pattern_report", "") or "").strip()
+            trend_text = (final_state.get("trend_report", "") or "").strip()
+            non_empty_sections = sum(
+                1 for section in [indicator_text, pattern_text, trend_text] if section
+            )
+
+            if len(df_slice) < 20 or non_empty_sections <= 1:
+                signal_confidence = "Low"
+            elif len(df_slice) < 40 or non_empty_sections == 2:
+                signal_confidence = "Medium"
+            else:
+                signal_confidence = "High"
+
+            # Convert to TradingView format for chart display
+            tradingview_data = self.convert_to_tradingview_format(df_slice)
+            support_resistance = self.extract_support_resistance_lines(df_slice)
+
             return {
                 "success": True,
                 "final_state": final_state,
                 "asset_name": asset_name,
                 "timeframe": display_timeframe,
                 "data_length": len(df_slice),
+                "current_price": current_price,
+                "last_timestamp": last_timestamp_str,
+                "last_timestamp_utc3": last_timestamp_utc3_str,
+                "signal_confidence": signal_confidence,
+                "tradingview_data": tradingview_data,
+                "support_resistance": support_resistance,
+                "raw_df": df_slice,  # Keep raw DataFrame for API endpoint
             }
 
         except Exception as e:
@@ -403,6 +555,17 @@ class WebTradingAnalyzer:
                 # If JSON parsing fails, return the raw text
                 final_decision = {"raw": final_decision_raw}
 
+        # Get TradingView data and symbol mapping
+        tradingview_data = results.get("tradingview_data", [])
+        support_resistance = results.get("support_resistance", {"support": [], "resistance": []})
+        asset_code = results.get("asset_name", "")
+        
+        # Map asset to TradingView symbol
+        tradingview_symbol = self.tradingview_symbols.get(asset_code, asset_code)
+        if asset_code not in self.tradingview_symbols and asset_code in self.custom_assets:
+            # For custom assets, try to use the symbol directly or add exchange prefix
+            tradingview_symbol = asset_code
+        
         return {
             "success": True,
             "asset_name": results["asset_name"],
@@ -416,6 +579,16 @@ class WebTradingAnalyzer:
             "pattern_image_filename": pattern_image_filename,
             "trend_image_filename": trend_image_filename,
             "final_decision": final_decision,
+            # Enriched metadata for UI
+            "current_price": results.get("current_price"),
+            "last_timestamp": results.get("last_timestamp"),
+            "last_timestamp_utc3": results.get("last_timestamp_utc3"),
+            "signal_confidence": results.get("signal_confidence"),
+            # TradingView data
+            "tradingview_data": tradingview_data,
+            "tradingview_symbol": tradingview_symbol,
+            "support_lines": support_resistance.get("support", []),
+            "resistance_lines": support_resistance.get("resistance", []),
         }
 
     def get_timeframe_date_limits(self, timeframe: str) -> Dict[str, Any]:
@@ -1024,6 +1197,59 @@ def validate_api_key():
         return jsonify(validation)
     except Exception as e:
         return jsonify({"valid": False, "error": str(e)})
+
+
+@app.route("/api/tradingview-data", methods=["GET"])
+def get_tradingview_data():
+    """API endpoint to get OHLCV data in TradingView format."""
+    try:
+        asset = request.args.get("asset")
+        timeframe = request.args.get("timeframe")
+        start_date = request.args.get("start_date")
+        end_date = request.args.get("end_date")
+        use_current_time = request.args.get("use_current_time", "false").lower() == "true"
+        
+        if not all([asset, timeframe, start_date, end_date]):
+            return jsonify({"error": "Missing required parameters: asset, timeframe, start_date, end_date"}), 400
+        
+        # Create datetime objects
+        start_datetime_str = f"{start_date} 00:00"
+        try:
+            start_dt = datetime.strptime(start_datetime_str, "%Y-%m-%d %H:%M")
+        except ValueError:
+            return jsonify({"error": "Invalid start date format"}), 400
+        
+        if use_current_time:
+            end_dt = datetime.now()
+        else:
+            end_datetime_str = f"{end_date} 23:59"
+            try:
+                end_dt = datetime.strptime(end_datetime_str, "%Y-%m-%d %H:%M")
+            except ValueError:
+                return jsonify({"error": "Invalid end date format"}), 400
+        
+        # Fetch data
+        df = analyzer.fetch_yfinance_data_with_datetime(asset, timeframe, start_dt, end_dt)
+        if df.empty:
+            return jsonify({"error": "No data available"}), 404
+        
+        # Convert to TradingView format
+        tradingview_data = analyzer.convert_to_tradingview_format(df)
+        support_resistance = analyzer.extract_support_resistance_lines(df)
+        
+        # Get TradingView symbol
+        tradingview_symbol = analyzer.tradingview_symbols.get(asset, asset)
+        tv_timeframe = analyzer.tradingview_timeframes.get(timeframe, timeframe)
+        
+        return jsonify({
+            "symbol": tradingview_symbol,
+            "timeframe": tv_timeframe,
+            "data": tradingview_data,
+            "support_lines": support_resistance.get("support", []),
+            "resistance_lines": support_resistance.get("resistance", []),
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/assets/<path:filename>")
