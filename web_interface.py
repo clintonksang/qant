@@ -386,6 +386,10 @@ class WebTradingAnalyzer:
             # Reset index to avoid any MultiIndex issues
             df_slice = df_slice.reset_index(drop=True)
 
+            # Shift timestamps to UTC+3 for chart display consistency
+            if "Datetime" in df_slice.columns:
+                df_slice["Datetime"] = df_slice["Datetime"] + timedelta(hours=3)
+
             # Debug: Check the slice before conversion
             print(f"Slice columns: {df_slice.columns}")
             print(f"Slice index: {type(df_slice.index)}")
@@ -1271,4 +1275,4 @@ if __name__ == "__main__":
     static_dir = Path("static")
     static_dir.mkdir(exist_ok=True)
 
-    app.run(debug=True, host="127.0.0.1", port=5000)
+    app.run(debug=True, host="0.0.0.0", port=5001)

@@ -1,0 +1,13 @@
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.env
+.DS_Store
+mt5/
+# We exclude the mt5 folder from the docker build because it's for Windows
+
+
