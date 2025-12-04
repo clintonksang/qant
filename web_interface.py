@@ -1111,7 +1111,8 @@ def update_api_key():
 
         # Update the environment variable
         if provider == "openai":
-            os.environ["OPENAI_API_KEY"] = new_api_key
+            # os.environ["OPENAI_API_KEY"] = new_api_key
+            "YOUR_OPENAI_API_KEY_HERE"  
         elif provider == "anthropic":
             os.environ["ANTHROPIC_API_KEY"] = new_api_key
         elif provider == "qwen":
@@ -1136,7 +1137,7 @@ def get_api_key_status():
         
         # First check environment variables
         if provider == "openai":
-            api_key = os.environ.get("OPENAI_API_KEY", "")
+            api_key = "YOUR_OPENAI_API_KEY_HERE"
             # Fallback to config if not in environment
             if not api_key and hasattr(analyzer, 'config'):
                 api_key = analyzer.config.get("api_key", "")
