@@ -3,6 +3,7 @@ from websocket import create_connection
 import datetime, os, time, ssl, csv
 from pathlib import Path
 import brain, execution
+import pattern_learner  # Pattern learning agent
 
 # Initialize
 TIINGO_KEY = os.getenv("TIINGO_KEY")
@@ -23,8 +24,9 @@ RSI_OVERSOLD = 30
 SMA_TOUCH_TOLERANCE = 2.50  # Price must be within $2.50 of SMA for pullback entry
 
 closes = []
+candles_history = []  # Store full candle data for pattern detection
 current_min = None
-candle = {"high": 0, "low": 99999, "close": 0}
+candle = {"high": 0, "low": 99999, "close": 0, "open": 0}
 last_trend_time = 0
 big_trend = "NEUTRAL"
 active_trades = []  # Track multiple open positions
@@ -59,62 +61,74 @@ def analyze_price_trend(prices):
     Analyze price trend across multiple timeframes.
     Returns a dict with trend info for the AI brain.
     """
-    if len(prices) < 20:
+    if len(prices) < 8:
         return {
             "short_trend": "NEUTRAL",
             "medium_trend": "NEUTRAL", 
             "momentum": "NEUTRAL",
-            "strength": 0,
-            "structure": "Insufficient data",
+            "strength": 50,
+            "structure": "Building data",
             "short_change": 0,
             "medium_change": 0,
-            "description": "Insufficient data"
+            "description": "Building data"
         }
     
-    # Short-term (last 5 candles) - for scalping
-    short_prices = prices[-5:]
+    # Short-term (last 3-5 candles) - for scalping
+    short_len = min(5, len(prices))
+    short_prices = prices[-short_len:]
     short_change = short_prices[-1] - short_prices[0]
-    short_trend = "BULLISH" if short_change > 0.50 else "BEARISH" if short_change < -0.50 else "NEUTRAL"
+    # Lower thresholds for gold scalping (0.30 = $0.30 move)
+    short_trend = "BULLISH" if short_change > 0.30 else "BEARISH" if short_change < -0.30 else "NEUTRAL"
     
-    # Medium-term (last 15 candles) - for direction
-    medium_prices = prices[-15:]
+    # Medium-term (last 8-15 candles) - for direction  
+    medium_len = min(15, len(prices))
+    medium_prices = prices[-medium_len:]
     medium_change = medium_prices[-1] - medium_prices[0]
-    medium_trend = "BULLISH" if medium_change > 1.50 else "BEARISH" if medium_change < -1.50 else "NEUTRAL"
+    # Lower thresholds (0.80 = $0.80 move)
+    medium_trend = "BULLISH" if medium_change > 0.80 else "BEARISH" if medium_change < -0.80 else "NEUTRAL"
     
     # Calculate momentum (rate of change)
-    if len(prices) >= 10:
-        recent_avg = sum(prices[-5:]) / 5
-        older_avg = sum(prices[-10:-5]) / 5
+    if len(prices) >= 6:
+        recent_avg = sum(prices[-3:]) / 3
+        older_avg = sum(prices[-6:-3]) / 3
         momentum_change = recent_avg - older_avg
-        momentum = "ACCELERATING_UP" if momentum_change > 1.0 else "ACCELERATING_DOWN" if momentum_change < -1.0 else "STABLE"
+        # Lower thresholds for momentum
+        momentum = "ACCELERATING_UP" if momentum_change > 0.50 else "ACCELERATING_DOWN" if momentum_change < -0.50 else "STABLE"
     else:
-        momentum = "NEUTRAL"
+        momentum = "STABLE"
     
     # Trend strength (0-100)
-    # Based on how many of last 10 candles moved in trend direction
-    if len(prices) >= 10:
-        ups = sum(1 for i in range(1, 10) if prices[-i] > prices[-i-1])
-        strength = ups * 10 if medium_trend == "BULLISH" else (10 - ups) * 10 if medium_trend == "BEARISH" else 50
+    # Based on how many of recent candles moved in trend direction
+    check_len = min(8, len(prices) - 1)
+    if check_len >= 3:
+        ups = sum(1 for i in range(1, check_len + 1) if prices[-i] > prices[-i-1])
+        if medium_trend == "BULLISH":
+            strength = int((ups / check_len) * 100)
+        elif medium_trend == "BEARISH":
+            strength = int(((check_len - ups) / check_len) * 100)
+        else:
+            strength = 50
     else:
         strength = 50
     
     # Higher highs / Lower lows detection
-    if len(prices) >= 10:
-        recent_high = max(prices[-5:])
-        older_high = max(prices[-10:-5])
-        recent_low = min(prices[-5:])
-        older_low = min(prices[-10:-5])
+    if len(prices) >= 8:
+        half = len(prices) // 2
+        recent_high = max(prices[-half:])
+        older_high = max(prices[:-half])
+        recent_low = min(prices[-half:])
+        older_low = min(prices[:-half])
         
         if recent_high > older_high and recent_low > older_low:
-            structure = "HIGHER_HIGHS_LOWS (Strong Uptrend)"
+            structure = "HIGHER_HIGHS_LOWS (Uptrend)"
         elif recent_high < older_high and recent_low < older_low:
-            structure = "LOWER_HIGHS_LOWS (Strong Downtrend)"
+            structure = "LOWER_HIGHS_LOWS (Downtrend)"
         elif recent_high > older_high and recent_low < older_low:
-            structure = "EXPANDING (Volatile/Choppy)"
+            structure = "EXPANDING (Volatile)"
         else:
-            structure = "CONSOLIDATING (Range-bound)"
+            structure = "CONSOLIDATING (Range)"
     else:
-        structure = "Unknown"
+        structure = "Building"
     
     # Build description for AI
     description = f"{medium_trend} trend with {momentum.lower().replace('_', ' ')} momentum. {structure}. Strength: {strength}/100"
@@ -209,7 +223,7 @@ def update_trade_in_csv(trade_id, status, exit_price, pnl, reason):
     with open(CSV_FILE, 'w', newline='') as f:
         csv.writer(f).writerows(rows)
 
-def open_trade(side, entry_price, timestamp):
+def open_trade(side, entry_price, timestamp, trend_analysis):
     global active_trades, last_trade_time
     trade_id = int(time.time() * 100) % 10000000000
     last_trade_time = time.time()  # Record trade time for cooldown
@@ -227,7 +241,11 @@ def open_trade(side, entry_price, timestamp):
         "entry": entry_price,
         "sl": sl,
         "tp": tp,
-        "time": timestamp
+        "time": timestamp,
+        # Store context for learning when trade closes
+        "entry_candles": candles_history.copy()[-20:] if len(candles_history) >= 20 else candles_history.copy(),
+        "entry_closes": closes.copy()[-20:] if len(closes) >= 20 else closes.copy(),
+        "entry_trend": trend_analysis
     }
     active_trades.append(new_trade)
     
@@ -294,6 +312,20 @@ def check_trade_exit(current_price):
             # Save to Pinecone memory
             execution.save_trade(trade["id"], side, entry, pnl, exit_reason)
             
+            # Learn from this trade (pattern learning)
+            try:
+                pattern_learner.learn_from_trade(
+                    entry_candles=trade.get("entry_candles", []),
+                    entry_closes=trade.get("entry_closes", []),
+                    entry_trend=trade.get("entry_trend", {}),
+                    trade_side=side,
+                    entry_price=entry,
+                    exit_price=exit_price,
+                    pnl=pnl
+                )
+            except Exception as learn_err:
+                print(f"⚠️ Learning error: {learn_err}")
+            
             emoji = "✅" if pnl > 0 else "❌"
             streak_info = f" | Losses: {consecutive_losses}" if consecutive_losses > 0 else ""
             print(f"\n{emoji} CLOSED {side} @ {exit_price:.2f} | PnL: {pnl:+.2f} | {exit_reason}{streak_info}")
@@ -328,11 +360,17 @@ while True:
                 last_trend_time = time.time()
 
             closes.append(candle['close'])
+            candles_history.append(candle.copy())  # Store full candle for pattern detection
             sma8 = sum(closes[-8:]) / 8 if len(closes) >= 8 else price
             rsi = calculate_rsi(closes, RSI_PERIOD)
             
             # Analyze price trend (multi-timeframe)
             trend_analysis = analyze_price_trend(closes)
+            
+            # Detect patterns
+            detected_patterns, _ = pattern_learner.detect_candle_pattern(candles_history) if len(candles_history) >= 3 else (None, "")
+            if detected_patterns:
+                print(f"📍 Patterns detected: {', '.join(detected_patterns)}")
             
             # Check warmup status
             if len(closes) >= RSI_PERIOD + 1 and not warmup_complete:
@@ -360,8 +398,26 @@ while True:
                 can_trade, filter_reason = check_filters(trade['decision'], candle['close'], sma8, rsi, timestamp)
                 
                 if can_trade:
+                    # Check pattern history before trading
+                    pattern_prediction = None
+                    if len(closes) >= 10:
+                        try:
+                            pattern_prediction = pattern_learner.predict_with_patterns(
+                                candles_history, closes, trend_analysis
+                            )
+                            if pattern_prediction and pattern_prediction.get('pattern_history'):
+                                win_rate = pattern_prediction['pattern_history'].get('win_rate', 0.5)
+                                print(f"📚 Pattern History: {win_rate*100:.0f}% win rate on similar setups")
+                                
+                                # If history shows poor performance, skip this trade
+                                if win_rate < 0.35:
+                                    print(f"⛔ PATTERN FILTER: Historical win rate too low ({win_rate*100:.0f}%)")
+                                    continue
+                        except Exception as pattern_err:
+                            pass  # Continue without pattern check
+                    
                     print(f"🎯 SIGNAL: {trade['decision']} - {trade['reasoning']}")
-                    open_trade(trade['decision'], candle['close'], timestamp)
+                    open_trade(trade['decision'], candle['close'], timestamp, trend_analysis)
                 else:
                     print(f"⛔ FILTERED: {trade['decision']} - {filter_reason}")
             elif trade['decision'] == "WAIT":
@@ -369,7 +425,7 @@ while True:
 
             # Reset Candle
             current_min = timestamp.minute
-            candle = {"high": price, "low": price, "close": price}
+            candle = {"open": price, "high": price, "low": price, "close": price}
         else:
             candle['high'] = max(candle['high'], price)
             candle['low'] = min(candle['low'], price)
