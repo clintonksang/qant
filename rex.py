@@ -26,6 +26,7 @@ SMA_TOUCH_TOLERANCE = 2.50  # Price must be within $2.50 of SMA for pullback ent
 closes = []
 candles_history = []  # Store full candle data for pattern detection
 current_min = None
+current_hour = None  # Track for hourly review
 candle = {"high": 0, "low": 99999, "close": 0, "open": 0}
 last_trend_time = 0
 big_trend = "NEUTRAL"
@@ -33,6 +34,7 @@ active_trades = []  # Track multiple open positions
 consecutive_losses = 0  # Track losing streak
 last_trade_time = 0  # Prevent rapid-fire trades
 warmup_complete = False  # Wait for enough data before trading
+last_hourly_review = 0  # Track when we last did hourly review
 
 # ===== TECHNICAL INDICATORS =====
 def calculate_rsi(prices, period=14):
@@ -423,9 +425,19 @@ while True:
         timestamp = datetime.datetime.fromisoformat(msg['data'][2])
         
         if current_min is None: current_min = timestamp.minute
+        if current_hour is None: current_hour = timestamp.hour
         
         # 2. Check if active trade hit SL/TP
         check_trade_exit(price)
+        
+        # === HOURLY STRATEGY REVIEW ===
+        if timestamp.hour != current_hour:
+            current_hour = timestamp.hour
+            try:
+                print("\n" + "🕔"*20)
+                execution.print_hourly_review()
+            except Exception as review_err:
+                print(f"\u26a0\ufe0f Hourly review error: {review_err}")
         
         # 3. End of Minute: Process Strategy
         if timestamp.minute != current_min:
@@ -473,63 +485,33 @@ while True:
                 can_trade, filter_reason = check_filters(trade['decision'], candle['close'], sma8, rsi, timestamp)
                 
                 if can_trade:
-                    # Get market context for pre-trade analysis
+                    # Get market context
                     session = execution.get_market_session(timestamp.hour)
                     price_action = execution.detect_price_action_type(closes, sma8) if len(closes) >= 5 else "UNKNOWN"
                     
-                    # === COMPREHENSIVE PRE-TRADE ANALYSIS ===
-                    pre_trade_ok = True
+                    # === LEARNING MODE: Take trades to build history ===
+                    # Check how much history we have
+                    total_history = 0
                     try:
-                        pre_analysis = execution.get_comprehensive_pre_trade_analysis(
-                            side=trade['decision'],
+                        cond_analysis, _ = execution.get_similar_conditions(
                             trend_1h=big_trend,
                             trend_15m=trend_analysis['medium_trend'],
                             structure=trend_analysis['structure'],
                             momentum=trend_analysis['momentum'],
                             session=session,
-                            price_action=price_action,
-                            patterns=detected_patterns
+                            price_action=price_action
                         )
-                        
-                        print(f"\n📊 PRE-TRADE ANALYSIS:")
-                        print(f"   Confidence: {pre_analysis['confidence']}/100")
-                        
-                        if pre_analysis['advantages']:
-                            print(f"   ✅ {' | '.join(pre_analysis['advantages'][:2])}")
-                        if pre_analysis['warnings']:
-                            print(f"   ⚠️  {' | '.join(pre_analysis['warnings'][:2])}")
-                        
-                        print(f"   {pre_analysis.get('recommendation', 'No recommendation')}")
-                        
-                        # Block trade if analysis says no
-                        if not pre_analysis.get('should_trade', True):
-                            print(f"⛔ BLOCKED BY HISTORY: {pre_analysis.get('recommendation', 'Low confidence')}")
-                            pre_trade_ok = False
-                            
-                    except Exception as analysis_err:
-                        # Continue without pre-trade analysis if it fails
-                        print(f"⚠️ Pre-trade analysis unavailable: {analysis_err}")
+                        if cond_analysis:
+                            total_history = cond_analysis.get('total_similar', 0)
+                    except:
+                        pass
                     
-                    # Check pattern history (existing code)
-                    pattern_prediction = None
-                    if len(closes) >= 10 and pre_trade_ok:
-                        try:
-                            pattern_prediction = pattern_learner.predict_with_patterns(
-                                candles_history, closes, trend_analysis
-                            )
-                            if pattern_prediction and pattern_prediction.get('pattern_history'):
-                                win_rate = pattern_prediction['pattern_history'].get('win_rate', 0.5)
-                                print(f"📚 Pattern History: {win_rate*100:.0f}% win rate on similar setups")
-                                
-                                # If history shows poor performance, skip this trade
-                                if win_rate < 0.35:
-                                    print(f"⛔ PATTERN FILTER: Historical win rate too low ({win_rate*100:.0f}%)")
-                                    pre_trade_ok = False
-                        except Exception as pattern_err:
-                            pass  # Continue without pattern check
+                    learning_mode = total_history < 20
                     
-                    if pre_trade_ok:
-                        print(f"\n🎯 SIGNAL: {trade['decision']} - {trade['reasoning']}")
+                    if learning_mode:
+                        # LEARNING MODE: No blocking, just log and take trades
+                        print(f"\n📚 LEARNING MODE ({total_history}/20 trades)")
+                        print(f"🎯 SIGNAL: {trade['decision']} - {trade['reasoning']}")
                         open_trade(
                             trade['decision'], 
                             candle['close'], 
@@ -539,6 +521,36 @@ while True:
                             sma8,
                             detected_patterns
                         )
+                    else:
+                        # ADAPTIVE MODE: Use history to filter
+                        pre_trade_ok = True
+                        try:
+                            if cond_analysis:
+                                side_win_rate = cond_analysis.get(
+                                    'buy_win_rate' if trade['decision'] == 'BUY' else 'sell_win_rate', 0.5
+                                )
+                                print(f"\n🧠 ADAPTIVE MODE ({total_history} trades)")
+                                print(f"   {trade['decision']} win rate: {side_win_rate*100:.0f}%")
+                                print(f"   Recommended: {cond_analysis.get('recommended_side', 'N/A')}")
+                                
+                                # Only block if win rate is really bad
+                                if side_win_rate < 0.25:
+                                    print(f"⛔ BLOCKED: {trade['decision']} has <25% win rate")
+                                    pre_trade_ok = False
+                        except Exception as e:
+                            pass
+                        
+                        if pre_trade_ok:
+                            print(f"🎯 SIGNAL: {trade['decision']} - {trade['reasoning']}")
+                            open_trade(
+                                trade['decision'], 
+                                candle['close'], 
+                                timestamp, 
+                                trend_analysis,
+                                rsi,
+                                sma8,
+                                detected_patterns
+                            )
                 else:
                     print(f"⛔ FILTERED: {trade['decision']} - {filter_reason}")
             elif trade['decision'] == "WAIT":
