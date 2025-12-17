@@ -1,0 +1,48 @@
+import os
+from openai import OpenAI
+from dotenv import load_dotenv
+
+load_dotenv()
+
+client = OpenAI(api_key=os.getenv("OPENAI_KEY"))
+
+def get_trade_decision(candle_data):
+    """
+    Sends the finished candle data to GPT-4o for analysis.
+    """
+    print("🧠 Rex is thinking...")
+    
+    # The Prompt: We give the AI the data and tell it how to think.
+    system_prompt = """
+    You are Rex, an aggressive Forex Scalper trading XAU/USD (Gold).
+    Your job is to analyze the 1-minute candle data provided.
+    
+    Strategy Rules:
+    1. If the candle is a 'Hammer' or 'Engulfing' pattern at a low, consider BUY.
+    2. If the candle is a 'Shooting Star' or 'Engulfing' at a high, consider SELL.
+    3. Look at the 'Imbalance'. If Buyers are heavy, lean Bullish.
+    
+    Output strictly in this JSON format:
+    {
+        "decision": "BUY" or "SELL" or "WAIT",
+        "confidence": "0-100%",
+        "reasoning": "Short explanation"
+    }
+    """
+
+    user_prompt = f"Analyze this candle data: {candle_data}"
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            response_format={"type": "json_object"} # Forces JSON output
+        )
+        
+        return response.choices[0].message.content
+        
+    except Exception as e:
+        return f"Error talking to Brain: {e}"
