@@ -513,3 +513,149 @@ def get_comprehensive_pre_trade_analysis(side, trend_1h, trend_15m, structure, m
         results["recommendation"] = "⛔ LOW CONFIDENCE - Consider waiting"
     
     return results
+
+
+# ============ HOURLY STRATEGY REVIEW ============
+def get_hourly_performance_review():
+    """
+    Generate a comprehensive review of the last hour's trading performance.
+    Call this every hour to track learning progress.
+    """
+    from datetime import timedelta
+    
+    # Get all recent trades
+    query = "Gold trade result"
+    docs = vectorstore.similarity_search(query, k=50)
+    
+    if not docs:
+        return {
+            "total_trades": 0,
+            "message": "No trades recorded yet. Keep collecting data."
+        }
+    
+    # Overall stats
+    total = len(docs)
+    wins = sum(1 for d in docs if d.metadata.get("outcome") == "WIN")
+    total_pnl = sum(d.metadata.get("pnl", 0) for d in docs)
+    
+    # By side
+    buys = [d for d in docs if d.metadata.get("side") == "BUY"]
+    sells = [d for d in docs if d.metadata.get("side") == "SELL"]
+    buy_wins = sum(1 for d in buys if d.metadata.get("outcome") == "WIN")
+    sell_wins = sum(1 for d in sells if d.metadata.get("outcome") == "WIN")
+    
+    # By session
+    session_stats = {}
+    for d in docs:
+        s = d.metadata.get("session", "UNKNOWN")
+        if s not in session_stats:
+            session_stats[s] = {"wins": 0, "total": 0, "pnl": 0}
+        session_stats[s]["total"] += 1
+        session_stats[s]["pnl"] += d.metadata.get("pnl", 0)
+        if d.metadata.get("outcome") == "WIN":
+            session_stats[s]["wins"] += 1
+    
+    # By trend alignment
+    with_trend = [d for d in docs if d.metadata.get("trend_alignment") == "WITH_TREND"]
+    counter_trend = [d for d in docs if d.metadata.get("trend_alignment") == "COUNTER_TREND"]
+    with_trend_wins = sum(1 for d in with_trend if d.metadata.get("outcome") == "WIN")
+    counter_trend_wins = sum(1 for d in counter_trend if d.metadata.get("outcome") == "WIN")
+    
+    review = {
+        "total_trades": total,
+        "win_rate": wins / total if total > 0 else 0,
+        "total_pnl": total_pnl,
+        "buy_stats": {
+            "total": len(buys),
+            "win_rate": buy_wins / len(buys) if buys else 0
+        },
+        "sell_stats": {
+            "total": len(sells),
+            "win_rate": sell_wins / len(sells) if sells else 0
+        },
+        "session_stats": session_stats,
+        "with_trend_win_rate": with_trend_wins / len(with_trend) if with_trend else 0,
+        "counter_trend_win_rate": counter_trend_wins / len(counter_trend) if counter_trend else 0,
+        "learning_progress": f"{total}/20 trades" if total < 20 else "Learning complete"
+    }
+    
+    # Generate insights
+    insights = []
+    
+    # Best/worst side
+    if buys and sells:
+        buy_wr = buy_wins / len(buys)
+        sell_wr = sell_wins / len(sells)
+        if buy_wr > sell_wr + 0.15:
+            insights.append(f"\u2705 BUY is significantly better ({buy_wr*100:.0f}% vs {sell_wr*100:.0f}%)")
+        elif sell_wr > buy_wr + 0.15:
+            insights.append(f"\u2705 SELL is significantly better ({sell_wr*100:.0f}% vs {buy_wr*100:.0f}%)")
+    
+    # Best session
+    if session_stats:
+        best_session = max(session_stats.items(), 
+                          key=lambda x: x[1]["wins"]/x[1]["total"] if x[1]["total"] >= 3 else 0)
+        if best_session[1]["total"] >= 3:
+            wr = best_session[1]["wins"] / best_session[1]["total"]
+            if wr > 0.55:
+                insights.append(f"\u2705 {best_session[0]} session is profitable ({wr*100:.0f}% win rate)")
+    
+    # Worst session
+    if session_stats:
+        worst_session = min(session_stats.items(),
+                           key=lambda x: x[1]["wins"]/x[1]["total"] if x[1]["total"] >= 3 else 1)
+        if worst_session[1]["total"] >= 3:
+            wr = worst_session[1]["wins"] / worst_session[1]["total"]
+            if wr < 0.40:
+                insights.append(f"\u26a0\ufe0f  {worst_session[0]} session is losing ({wr*100:.0f}% win rate)")
+    
+    # Trend following effectiveness
+    if with_trend and counter_trend:
+        wt_wr = with_trend_wins / len(with_trend)
+        ct_wr = counter_trend_wins / len(counter_trend)
+        if wt_wr > ct_wr:
+            insights.append(f"\u2705 Trend-following works ({wt_wr*100:.0f}% vs counter-trend {ct_wr*100:.0f}%)")
+        else:
+            insights.append(f"\u26a0\ufe0f  Counter-trend is beating trend-following!")
+    
+    review["insights"] = insights
+    
+    return review
+
+
+def print_hourly_review():
+    """
+    Print a formatted hourly review to the console.
+    """
+    review = get_hourly_performance_review()
+    
+    print("\n" + "="*60)
+    print("\ud83d\udcca HOURLY STRATEGY REVIEW")
+    print("="*60)
+    
+    if review["total_trades"] == 0:
+        print("No trades recorded yet. Keep collecting data.")
+        return review
+    
+    print(f"\n\ud83d\udcc8 OVERALL: {review['total_trades']} trades | {review['win_rate']*100:.0f}% win rate | PnL: {review['total_pnl']:+.2f}")
+    print(f"   Learning: {review['learning_progress']}")
+    
+    print(f"\n\ud83d\udfe2 BUY: {review['buy_stats']['total']} trades | {review['buy_stats']['win_rate']*100:.0f}% win rate")
+    print(f"\ud83d\udd34 SELL: {review['sell_stats']['total']} trades | {review['sell_stats']['win_rate']*100:.0f}% win rate")
+    
+    if review.get('with_trend_win_rate'):
+        print(f"\n\ud83c\udfaf With-Trend: {review['with_trend_win_rate']*100:.0f}% | Counter-Trend: {review['counter_trend_win_rate']*100:.0f}%")
+    
+    print("\n\ud83d\udd52 SESSION BREAKDOWN:")
+    for session, stats in review.get("session_stats", {}).items():
+        wr = stats["wins"] / stats["total"] * 100 if stats["total"] > 0 else 0
+        print(f"   {session}: {stats['total']} trades | {wr:.0f}% | PnL: {stats['pnl']:+.2f}")
+    
+    if review.get("insights"):
+        print("\n\ud83d\udca1 INSIGHTS:")
+        for insight in review["insights"]:
+            print(f"   {insight}")
+    
+    print("="*60 + "\n")
+    
+    return review
