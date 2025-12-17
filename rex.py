@@ -161,7 +161,7 @@ def check_filters(side, price, sma, rsi, timestamp):
     """Check all entry filters. Returns (can_trade, reason)."""
     global consecutive_losses, last_trade_time, warmup_complete, active_trades
     
-    # 0. Warmup check - need enough data for RSI
+    # 0. Warmup check - need enough data
     if not warmup_complete:
         return False, f"Warming up (need {RSI_PERIOD + 1} candles)"
     
@@ -180,16 +180,8 @@ def check_filters(side, price, sma, rsi, timestamp):
         if t['side'] != side:
             return False, f"Conflicting {t['side']} position open"
     
-    # 4. RSI filter - don't buy overbought, don't sell oversold
-    if side == "BUY" and rsi > RSI_OVERBOUGHT:
-        return False, f"RSI {rsi:.0f} > {RSI_OVERBOUGHT} (overbought)"
-    if side == "SELL" and rsi < RSI_OVERSOLD:
-        return False, f"RSI {rsi:.0f} < {RSI_OVERSOLD} (oversold)"
-    
-    # 5. Pullback filter - wait for price to be near SMA
-    if not is_pullback_entry(price, sma, side):
-        distance = abs(price - sma)
-        return False, f"No pullback (${distance:.2f} from SMA)"
+    # RSI and Pullback filters REMOVED - we follow trends only!
+    # The AI brain decides based on 1H trend, not RSI
     
     return True, "All filters passed"
 
@@ -223,7 +215,7 @@ def update_trade_in_csv(trade_id, status, exit_price, pnl, reason):
     with open(CSV_FILE, 'w', newline='') as f:
         csv.writer(f).writerows(rows)
 
-def open_trade(side, entry_price, timestamp, trend_analysis):
+def open_trade(side, entry_price, timestamp, trend_analysis, rsi, sma, detected_patterns=None):
     global active_trades, last_trade_time
     trade_id = int(time.time() * 100) % 10000000000
     last_trade_time = time.time()  # Record trade time for cooldown
@@ -235,6 +227,14 @@ def open_trade(side, entry_price, timestamp, trend_analysis):
         sl = entry_price + SL_PIPS
         tp = entry_price - TP_PIPS
     
+    # Get market context for learning
+    hour_utc = timestamp.hour
+    weekday = timestamp.weekday()
+    session = execution.get_market_session(hour_utc)
+    price_action_type = execution.detect_price_action_type(closes, sma) if len(closes) >= 5 else "UNKNOWN"
+    volatility = execution.calculate_volatility(closes) if len(closes) >= 20 else 0
+    sma_position = "ABOVE" if entry_price > sma else "BELOW"
+    
     new_trade = {
         "id": trade_id,
         "side": side,
@@ -242,10 +242,28 @@ def open_trade(side, entry_price, timestamp, trend_analysis):
         "sl": sl,
         "tp": tp,
         "time": timestamp,
-        # Store context for learning when trade closes
+        "open_timestamp": time.time(),  # For hold time calculation
+        
+        # Store FULL context for learning when trade closes
         "entry_candles": candles_history.copy()[-20:] if len(candles_history) >= 20 else candles_history.copy(),
         "entry_closes": closes.copy()[-20:] if len(closes) >= 20 else closes.copy(),
-        "entry_trend": trend_analysis
+        "entry_trend": trend_analysis,
+        
+        # Technical context at entry
+        "entry_rsi": rsi,
+        "entry_sma": sma,
+        "entry_sma_position": sma_position,
+        "entry_volatility": volatility,
+        "entry_price_action": price_action_type,
+        "entry_patterns": detected_patterns or [],
+        
+        # Time context
+        "entry_hour_utc": hour_utc,
+        "entry_weekday": weekday,
+        "entry_session": session,
+        
+        # 1H trend at entry
+        "entry_trend_1h": big_trend
     }
     active_trades.append(new_trade)
     
@@ -263,7 +281,15 @@ def open_trade(side, entry_price, timestamp, trend_analysis):
         ""
     ]
     log_trade(trade_row)
-    print(f"\n📈 OPENED {side} #{len(active_trades)} @ {entry_price:.2f} | SL: {sl:.2f} | TP: {tp:.2f}")
+    
+    # Enhanced logging
+    rr_ratio = TP_PIPS / SL_PIPS
+    print(f"\n{'='*60}")
+    print(f"📈 OPENED {side} #{len(active_trades)} @ {entry_price:.2f}")
+    print(f"   SL: {sl:.2f} | TP: {tp:.2f} | R:R 1:{rr_ratio:.1f}")
+    print(f"   Session: {session} | Entry: {price_action_type}")
+    print(f"   Context: 1H {big_trend} | RSI {rsi:.0f} | SMA {sma_position}")
+    print(f"{'='*60}")
     return new_trade
 
 def check_trade_exit(current_price):
@@ -309,15 +335,62 @@ def check_trade_exit(current_price):
             
             update_trade_in_csv(trade["id"], "CLOSED", exit_price, pnl, exit_reason)
             
-            # Save to Pinecone memory
-            execution.save_trade(trade["id"], side, entry, pnl, exit_reason)
+            # Calculate hold time
+            hold_time_minutes = int((time.time() - trade.get("open_timestamp", time.time())) / 60)
+            
+            # Get entry context from trade object
+            entry_trend = trade.get("entry_trend", {})
+            
+            # === ENHANCED LEARNING: Save comprehensive trade data ===
+            try:
+                execution.save_trade_enhanced(
+                    trade_id=trade["id"],
+                    side=side,
+                    entry=entry,
+                    exit_price=exit_price,
+                    sl=sl,
+                    tp=tp,
+                    pnl=pnl,
+                    reason=exit_reason,
+                    
+                    # Trend context (stored at entry)
+                    trend_1h=trade.get("entry_trend_1h", big_trend),
+                    trend_15m=entry_trend.get("medium_trend", "NEUTRAL"),
+                    trend_5m=entry_trend.get("short_trend", "NEUTRAL"),
+                    momentum=entry_trend.get("momentum", "STABLE"),
+                    structure=entry_trend.get("structure", "UNKNOWN"),
+                    
+                    # Technical indicators at entry
+                    rsi=trade.get("entry_rsi", 50),
+                    sma=trade.get("entry_sma", entry),
+                    sma_position=trade.get("entry_sma_position", "NEUTRAL"),
+                    
+                    # Price action context
+                    patterns_detected=trade.get("entry_patterns", []),
+                    price_action_type=trade.get("entry_price_action", "UNKNOWN"),
+                    volatility=trade.get("entry_volatility", 0),
+                    
+                    # Time context
+                    hour_utc=trade.get("entry_hour_utc", 12),
+                    weekday=trade.get("entry_weekday", 2),
+                    session=trade.get("entry_session", "UNKNOWN"),
+                    
+                    # Trade metrics
+                    hold_time_minutes=hold_time_minutes,
+                    price_change_5m=entry_trend.get("short_change", 0),
+                    price_change_15m=entry_trend.get("medium_change", 0)
+                )
+            except Exception as save_err:
+                print(f"⚠️ Enhanced save error: {save_err}")
+                # Fallback to basic save
+                execution.save_trade(trade["id"], side, entry, pnl, exit_reason)
             
             # Learn from this trade (pattern learning)
             try:
                 pattern_learner.learn_from_trade(
                     entry_candles=trade.get("entry_candles", []),
                     entry_closes=trade.get("entry_closes", []),
-                    entry_trend=trade.get("entry_trend", {}),
+                    entry_trend=entry_trend,
                     trade_side=side,
                     entry_price=entry,
                     exit_price=exit_price,
@@ -328,7 +401,9 @@ def check_trade_exit(current_price):
             
             emoji = "✅" if pnl > 0 else "❌"
             streak_info = f" | Losses: {consecutive_losses}" if consecutive_losses > 0 else ""
-            print(f"\n{emoji} CLOSED {side} @ {exit_price:.2f} | PnL: {pnl:+.2f} | {exit_reason}{streak_info}")
+            rr_achieved = abs(pnl) / SL_PIPS
+            print(f"\n{emoji} CLOSED {side} @ {exit_price:.2f} | PnL: {pnl:+.2f} ({rr_achieved:.1f}R) | {exit_reason}")
+            print(f"   Hold: {hold_time_minutes}min | Session: {trade.get('entry_session', 'N/A')}{streak_info}")
             trades_to_close.append(trade)
     
     # Remove closed trades
@@ -398,9 +473,46 @@ while True:
                 can_trade, filter_reason = check_filters(trade['decision'], candle['close'], sma8, rsi, timestamp)
                 
                 if can_trade:
-                    # Check pattern history before trading
+                    # Get market context for pre-trade analysis
+                    session = execution.get_market_session(timestamp.hour)
+                    price_action = execution.detect_price_action_type(closes, sma8) if len(closes) >= 5 else "UNKNOWN"
+                    
+                    # === COMPREHENSIVE PRE-TRADE ANALYSIS ===
+                    pre_trade_ok = True
+                    try:
+                        pre_analysis = execution.get_comprehensive_pre_trade_analysis(
+                            side=trade['decision'],
+                            trend_1h=big_trend,
+                            trend_15m=trend_analysis['medium_trend'],
+                            structure=trend_analysis['structure'],
+                            momentum=trend_analysis['momentum'],
+                            session=session,
+                            price_action=price_action,
+                            patterns=detected_patterns
+                        )
+                        
+                        print(f"\n📊 PRE-TRADE ANALYSIS:")
+                        print(f"   Confidence: {pre_analysis['confidence']}/100")
+                        
+                        if pre_analysis['advantages']:
+                            print(f"   ✅ {' | '.join(pre_analysis['advantages'][:2])}")
+                        if pre_analysis['warnings']:
+                            print(f"   ⚠️  {' | '.join(pre_analysis['warnings'][:2])}")
+                        
+                        print(f"   {pre_analysis.get('recommendation', 'No recommendation')}")
+                        
+                        # Block trade if analysis says no
+                        if not pre_analysis.get('should_trade', True):
+                            print(f"⛔ BLOCKED BY HISTORY: {pre_analysis.get('recommendation', 'Low confidence')}")
+                            pre_trade_ok = False
+                            
+                    except Exception as analysis_err:
+                        # Continue without pre-trade analysis if it fails
+                        print(f"⚠️ Pre-trade analysis unavailable: {analysis_err}")
+                    
+                    # Check pattern history (existing code)
                     pattern_prediction = None
-                    if len(closes) >= 10:
+                    if len(closes) >= 10 and pre_trade_ok:
                         try:
                             pattern_prediction = pattern_learner.predict_with_patterns(
                                 candles_history, closes, trend_analysis
@@ -412,12 +524,21 @@ while True:
                                 # If history shows poor performance, skip this trade
                                 if win_rate < 0.35:
                                     print(f"⛔ PATTERN FILTER: Historical win rate too low ({win_rate*100:.0f}%)")
-                                    continue
+                                    pre_trade_ok = False
                         except Exception as pattern_err:
                             pass  # Continue without pattern check
                     
-                    print(f"🎯 SIGNAL: {trade['decision']} - {trade['reasoning']}")
-                    open_trade(trade['decision'], candle['close'], timestamp, trend_analysis)
+                    if pre_trade_ok:
+                        print(f"\n🎯 SIGNAL: {trade['decision']} - {trade['reasoning']}")
+                        open_trade(
+                            trade['decision'], 
+                            candle['close'], 
+                            timestamp, 
+                            trend_analysis,
+                            rsi,
+                            sma8,
+                            detected_patterns
+                        )
                 else:
                     print(f"⛔ FILTERED: {trade['decision']} - {filter_reason}")
             elif trade['decision'] == "WAIT":
