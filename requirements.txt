@@ -4,3 +4,4 @@ openai
 python-dotenv
 ssl
 dotenv
+pinecone
