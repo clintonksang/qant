@@ -1,0 +1,18 @@
+[Unit]
+Description=QuantAgent Trading Bot
+After=network.target
+
+[Service]
+Type=simple
+User=quantagent
+Group=quantagent
+WorkingDirectory=/opt/quantagent
+Environment="PATH=/opt/quantagent/venv/bin"
+ExecStart=/opt/quantagent/venv/bin/python3 rex.py
+Restart=always
+RestartSec=10
+StandardOutput=append:/opt/quantagent/logs/quantagent.log
+StandardError=append:/opt/quantagent/logs/quantagent_error.log
+
+[Install]
+WantedBy=multi-user.target
