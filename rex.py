@@ -21,14 +21,17 @@ ws.send(json.dumps({'eventName':'subscribe', 'authorization':TIINGO_KEY, 'eventD
 SL_PIPS = 2.00  # Stop Loss in dollars (tighter for scalping)
 TP_PIPS = 2.50  # Take Profit in dollars (1.25:1 R:R - faster exits)
 MAX_TRADES = 2  # Max concurrent trades
-MAX_CONSECUTIVE_LOSSES = 4  # Pause trading after this many losses
-MIN_MINUTES_BETWEEN_TRADES = 3  # Faster re-entry allowed
+MAX_CONSECUTIVE_LOSSES = 3  # Pause trading after 3 losses (was 4 - more conservative)
+MIN_MINUTES_BETWEEN_TRADES = 4  # Slower re-entry (was 3) - reduces overtrading
 
 # Scalping Enhancements - THE KEY TO FASTER PROFITS
-TRAILING_TRIGGER = 1.50  # When up $1.50, move SL to breakeven and start trailing
-TRAILING_STEP = 0.50     # Trail SL by $0.50 increments
+# v4 FIX: Trailing was too tight, capturing tiny wins while losses stay full
+#   Before: Trigger $1.50, Buffer $0.20 → Avg win $1.39 vs Avg loss $2.00 
+#   After:  Trigger $1.80, Buffer $0.70 → Lock in at least $0.70 minimum profit
+TRAILING_TRIGGER = 1.80  # When up $1.80, start trailing (gives more room)
+TRAILING_STEP = 0.40     # Trail SL by $0.40 increments (tighter once in profit)
 MAX_HOLD_MINUTES = 12    # Force close if trade sits too long (scalps shouldn't linger)
-BREAKEVEN_BUFFER = 0.20  # Small buffer above entry when moving to breakeven
+BREAKEVEN_BUFFER = 0.70  # Lock in $0.70 minimum when trailing starts (was $0.20)
 
 # Technical Parameters
 RSI_PERIOD = 14
@@ -144,6 +147,7 @@ def check_short_term_trend_conflict(side, trend_analysis):
     short_trend = trend_analysis.get('short_trend', 'NEUTRAL')
     medium_trend = trend_analysis.get('medium_trend', 'NEUTRAL')
     momentum = trend_analysis.get('momentum', 'STABLE')
+    structure = trend_analysis.get('structure', '')
     
     # If trying to SELL but short-term is strongly bullish
     if side == "SELL":
@@ -158,6 +162,11 @@ def check_short_term_trend_conflict(side, trend_analysis):
             return True, f"🚫 CONFLICT: 5m & 15m both BEARISH - don't BUY"
         if momentum == "ACCELERATING_DOWN" and short_trend == "BEARISH":
             return True, f"🚫 CONFLICT: Accelerating DOWN with bearish 5m - don't BUY"
+    
+    # v4 FIX: Avoid choppy consolidation unless momentum is VERY strong
+    if "CONSOLIDATING" in structure or "Range" in structure:
+        if momentum == "STABLE":
+            return True, f"🚫 CHOPPY: Consolidating with STABLE momentum - wait for breakout"
     
     return False, "No trend conflict"
 
@@ -577,8 +586,10 @@ def check_trade_exit(current_price):
 
 init_csv()
 init_price_log()  # Initialize price movement logging
-print("🚀 Rex v3 (Momentum Protected) is Live...")
+print("🚀 Rex v4 (Trailing Optimized) is Live...")
+print(f"   📊 R:R Fix: Trail at +${TRAILING_TRIGGER}, lock in ${BREAKEVEN_BUFFER} minimum")
 print(f"   ⚡ Momentum protection: Block counter-trend when price moves ${MOMENTUM_THRESHOLD}+ in {MOMENTUM_LOOKBACK}min")
+print(f"   🚫 Choppy filter: Avoid consolidation with stable momentum")
 
 while True:
     try:
