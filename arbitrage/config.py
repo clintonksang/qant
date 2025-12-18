@@ -77,13 +77,21 @@ CORRELATION_DRIFT_WARNING = 0.15   # Warn if correlation drifts by this much
 CORRELATION_BREAKDOWN = 0.25       # Skip trades if correlation broken by this much
 
 # Position Management
-MAX_CONCURRENT_TRADES = 3          # Max arbitrage positions at once
-MAX_HOLD_MINUTES = 60              # Force close after this time
+MAX_CONCURRENT_TRADES = 2          # v2: Reduced from 3 (focus on quality)
+MAX_HOLD_MINUTES = 15              # v2: Reduced from 60 (31min hold lost -9.4 pips!)
 STOP_LOSS_ZSCORE = 3.5             # Stop if Z-score goes further against us
 
 # Risk Management
 CONSECUTIVE_LOSS_PAUSE = 3         # Pause after this many losses
-MIN_MINUTES_BETWEEN_TRADES = 5     # Cooldown between trades on same pair
+MIN_MINUTES_BETWEEN_TRADES = 8     # v2: Increased from 5 (reduce overtrading)
+
+# v2: Per-pair hold limits (some pairs need faster exits)
+PAIR_MAX_HOLD = {
+    "EUR_GBP": 10,          # EUR_GBP underperforming - faster exit
+    "EUR_CHF_MIRROR": 15,   # Star performer - give it room
+    "COMMODITY_TWINS": 12,  # Moderate
+    "JPY_CROSSES": 10,      # JPY volatile - faster exit
+}
 
 # Data Requirements
 LOOKBACK_PERIOD = 30               # Minutes of data for correlation
