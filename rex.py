@@ -49,6 +49,118 @@ last_trade_time = 0  # Prevent rapid-fire trades
 warmup_complete = False  # Wait for enough data before trading
 last_hourly_review = 0  # Track when we last did hourly review
 
+# ===== MOMENTUM PROTECTION (NEW) =====
+# Prevents selling into rallies / buying into dumps
+MOMENTUM_THRESHOLD = 5.0      # If price moved $5+ in last 10 mins, strong momentum
+MOMENTUM_LOOKBACK = 10        # Minutes to check for momentum
+TREND_REFRESH_FAST = 300      # 5 min refresh during volatile sessions
+TREND_REFRESH_SLOW = 900      # 15 min refresh during calm sessions
+
+# ===== PRICE MOVEMENT LOGGING (NEW) =====
+PRICE_LOG_FILE = Path(__file__).parent / "price_movements.csv"
+PRICE_LOG_HEADERS = [
+    "Timestamp", "Price", "Open", "High", "Low", "Close",
+    "Change_1min", "Change_5min", "Change_10min", "Change_15min",
+    "SMA8", "RSI", "Trend_1H", "Trend_15m", "Trend_5m", 
+    "Momentum", "Structure", "Session"
+]
+
+def init_price_log():
+    """Initialize price movement CSV for learning."""
+    if not PRICE_LOG_FILE.exists():
+        with open(PRICE_LOG_FILE, 'w', newline='') as f:
+            csv.writer(f).writerow(PRICE_LOG_HEADERS)
+
+def log_price_movement(timestamp, price, candle_data, closes_list, sma, rsi, 
+                        trend_1h, trend_analysis, session):
+    """Log price movement for learning patterns."""
+    try:
+        # Calculate price changes over different periods
+        change_1m = closes_list[-1] - closes_list[-2] if len(closes_list) >= 2 else 0
+        change_5m = closes_list[-1] - closes_list[-6] if len(closes_list) >= 6 else 0
+        change_10m = closes_list[-1] - closes_list[-11] if len(closes_list) >= 11 else 0
+        change_15m = closes_list[-1] - closes_list[-16] if len(closes_list) >= 16 else 0
+        
+        row = [
+            timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+            f"{price:.2f}",
+            f"{candle_data['open']:.2f}",
+            f"{candle_data['high']:.2f}",
+            f"{candle_data['low']:.2f}",
+            f"{candle_data['close']:.2f}",
+            f"{change_1m:.2f}",
+            f"{change_5m:.2f}",
+            f"{change_10m:.2f}",
+            f"{change_15m:.2f}",
+            f"{sma:.2f}",
+            f"{rsi:.0f}",
+            trend_1h,
+            trend_analysis.get('medium_trend', 'N/A'),
+            trend_analysis.get('short_trend', 'N/A'),
+            trend_analysis.get('momentum', 'N/A'),
+            trend_analysis.get('structure', 'N/A'),
+            session
+        ]
+        
+        with open(PRICE_LOG_FILE, 'a', newline='') as f:
+            csv.writer(f).writerow(row)
+    except Exception as e:
+        pass  # Don't let logging errors affect trading
+
+def check_momentum_override(side, closes_list):
+    """
+    Check if strong momentum should override the trade decision.
+    Returns (should_block, reason)
+    
+    KEY FIX: Don't SELL during strong rallies, don't BUY during strong dumps
+    """
+    if len(closes_list) < MOMENTUM_LOOKBACK + 1:
+        return False, "Not enough data for momentum check"
+    
+    # Calculate price change over lookback period
+    recent_change = closes_list[-1] - closes_list[-(MOMENTUM_LOOKBACK + 1)]
+    
+    # Strong upward momentum
+    if recent_change > MOMENTUM_THRESHOLD:
+        if side == "SELL":
+            return True, f"🚫 BLOCKED: Price up ${recent_change:.2f} in {MOMENTUM_LOOKBACK}min - DON'T SELL INTO RALLY"
+        else:
+            return False, f"✅ BUY aligns with rally (+${recent_change:.2f})"
+    
+    # Strong downward momentum
+    if recent_change < -MOMENTUM_THRESHOLD:
+        if side == "BUY":
+            return True, f"🚫 BLOCKED: Price down ${abs(recent_change):.2f} in {MOMENTUM_LOOKBACK}min - DON'T BUY INTO DUMP"
+        else:
+            return False, f"✅ SELL aligns with dump (-${abs(recent_change):.2f})"
+    
+    return False, f"Momentum OK (${recent_change:+.2f} in {MOMENTUM_LOOKBACK}min)"
+
+def check_short_term_trend_conflict(side, trend_analysis):
+    """
+    Check if short-term trends conflict with trade direction.
+    If both 5m and 15m are opposite to trade, block it.
+    """
+    short_trend = trend_analysis.get('short_trend', 'NEUTRAL')
+    medium_trend = trend_analysis.get('medium_trend', 'NEUTRAL')
+    momentum = trend_analysis.get('momentum', 'STABLE')
+    
+    # If trying to SELL but short-term is strongly bullish
+    if side == "SELL":
+        if short_trend == "BULLISH" and medium_trend == "BULLISH":
+            return True, f"🚫 CONFLICT: 5m & 15m both BULLISH - don't SELL"
+        if momentum == "ACCELERATING_UP" and short_trend == "BULLISH":
+            return True, f"🚫 CONFLICT: Accelerating UP with bullish 5m - don't SELL"
+    
+    # If trying to BUY but short-term is strongly bearish
+    if side == "BUY":
+        if short_trend == "BEARISH" and medium_trend == "BEARISH":
+            return True, f"🚫 CONFLICT: 5m & 15m both BEARISH - don't BUY"
+        if momentum == "ACCELERATING_DOWN" and short_trend == "BEARISH":
+            return True, f"🚫 CONFLICT: Accelerating DOWN with bearish 5m - don't BUY"
+    
+    return False, "No trend conflict"
+
 # ===== TECHNICAL INDICATORS =====
 def calculate_rsi(prices, period=14):
     """Calculate RSI from price list."""
@@ -464,7 +576,9 @@ def check_trade_exit(current_price):
         active_trades.remove(trade)
 
 init_csv()
-print("🚀 Rex v2 (LangChain Edition) is Live...")
+init_price_log()  # Initialize price movement logging
+print("🚀 Rex v3 (Momentum Protected) is Live...")
+print(f"   ⚡ Momentum protection: Block counter-trend when price moves ${MOMENTUM_THRESHOLD}+ in {MOMENTUM_LOOKBACK}min")
 
 while True:
     try:
@@ -492,10 +606,14 @@ while True:
         
         # 3. End of Minute: Process Strategy
         if timestamp.minute != current_min:
-            # Refresh 1H Trend every 15 mins
-            if (time.time() - last_trend_time) > 900:
+            # Refresh 1H Trend - faster during volatile sessions (US_OVERLAP)
+            session = execution.get_market_session(timestamp.hour)
+            refresh_interval = TREND_REFRESH_FAST if session in ["US_OVERLAP", "LONDON"] else TREND_REFRESH_SLOW
+            
+            if (time.time() - last_trend_time) > refresh_interval:
                 big_trend = execution.get_1hour_trend()
                 last_trend_time = time.time()
+                print(f"\n🔄 1H Trend refreshed: {big_trend} (interval: {refresh_interval//60}min)")
 
             closes.append(candle['close'])
             candles_history.append(candle.copy())  # Store full candle for pattern detection
@@ -531,9 +649,34 @@ while True:
             print(f"💨 Momentum: {trend_analysis['momentum']} | Structure: {trend_analysis['structure']}")
             print(f"🤖 AI: {trade['decision']} (Confidence: {confidence}/10){warmup_status}")
             
+            # Log price movement for learning
+            try:
+                log_price_movement(
+                    timestamp, candle['close'], candle, closes, sma8, rsi,
+                    big_trend, trend_analysis, session
+                )
+            except Exception as log_err:
+                pass
+            
             # Open new trade if under max limit AND filters pass
             if trade['decision'] != "WAIT" and len(active_trades) < MAX_TRADES:
                 can_trade, filter_reason = check_filters(trade['decision'], candle['close'], sma8, rsi, timestamp)
+                
+                if can_trade:
+                    # ===== MOMENTUM PROTECTION (NEW) =====
+                    momentum_blocked, momentum_reason = check_momentum_override(trade['decision'], closes)
+                    if momentum_blocked:
+                        print(f"\n{momentum_reason}")
+                        can_trade = False
+                        filter_reason = momentum_reason
+                    
+                    # ===== SHORT-TERM TREND CONFLICT CHECK (NEW) =====
+                    if can_trade:
+                        trend_blocked, trend_reason = check_short_term_trend_conflict(trade['decision'], trend_analysis)
+                        if trend_blocked:
+                            print(f"\n{trend_reason}")
+                            can_trade = False
+                            filter_reason = trend_reason
                 
                 if can_trade:
                     # Get market context
