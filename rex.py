@@ -10,12 +10,25 @@ TIINGO_KEY = os.getenv("TIINGO_KEY")
 ws = create_connection("wss://api.tiingo.com/fx", sslopt={"cert_reqs": ssl.CERT_NONE})
 ws.send(json.dumps({'eventName':'subscribe', 'authorization':TIINGO_KEY, 'eventData':{'tickers':["xauusd"]}}))
 
+# ============================================================
+# FAST SCALPING CONFIG - Tuned for quick trend captures
+# ============================================================
+# Before: SL $2.50 / TP $5.00 = Too slow, market reverses before TP
+# Now: Tighter targets + trailing stop + time exit
+# ============================================================
+
 # Risk Parameters
-SL_PIPS = 2.50  # Stop Loss in dollars
-TP_PIPS = 5.00  # Take Profit in dollars (2:1 R:R)
-MAX_TRADES = 2  # Max concurrent trades (reduced to prevent over-exposure)
+SL_PIPS = 2.00  # Stop Loss in dollars (tighter for scalping)
+TP_PIPS = 2.50  # Take Profit in dollars (1.25:1 R:R - faster exits)
+MAX_TRADES = 2  # Max concurrent trades
 MAX_CONSECUTIVE_LOSSES = 4  # Pause trading after this many losses
-MIN_MINUTES_BETWEEN_TRADES = 5  # Don't stack trades too quickly
+MIN_MINUTES_BETWEEN_TRADES = 3  # Faster re-entry allowed
+
+# Scalping Enhancements - THE KEY TO FASTER PROFITS
+TRAILING_TRIGGER = 1.50  # When up $1.50, move SL to breakeven and start trailing
+TRAILING_STEP = 0.50     # Trail SL by $0.50 increments
+MAX_HOLD_MINUTES = 12    # Force close if trade sits too long (scalps shouldn't linger)
+BREAKEVEN_BUFFER = 0.20  # Small buffer above entry when moving to breakeven
 
 # Technical Parameters
 RSI_PERIOD = 14
@@ -289,13 +302,14 @@ def open_trade(side, entry_price, timestamp, trend_analysis, rsi, sma, detected_
     print(f"\n{'='*60}")
     print(f"📈 OPENED {side} #{len(active_trades)} @ {entry_price:.2f}")
     print(f"   SL: {sl:.2f} | TP: {tp:.2f} | R:R 1:{rr_ratio:.1f}")
+    print(f"   🔒 Trail at +${TRAILING_TRIGGER} | ⏱️ Max hold: {MAX_HOLD_MINUTES}min")
     print(f"   Session: {session} | Entry: {price_action_type}")
     print(f"   Context: 1H {big_trend} | RSI {rsi:.0f} | SMA {sma_position}")
     print(f"{'='*60}")
     return new_trade
 
 def check_trade_exit(current_price):
-    """Check if any active trades hit SL or TP."""
+    """Check if any active trades hit SL or TP, with trailing stop and time exit."""
     global active_trades, consecutive_losses
     trades_to_close = []
     
@@ -308,20 +322,56 @@ def check_trade_exit(current_price):
         exit_reason = None
         exit_price = None
         
+        # Calculate current P&L
         if side == "BUY":
-            if current_price <= sl:
-                exit_reason = "SL HIT"
-                exit_price = sl
-            elif current_price >= tp:
-                exit_reason = "TP HIT"
-                exit_price = tp
-        else:  # SELL
-            if current_price >= sl:
-                exit_reason = "SL HIT"
-                exit_price = sl
-            elif current_price <= tp:
-                exit_reason = "TP HIT"
-                exit_price = tp
+            current_pnl = current_price - entry
+        else:
+            current_pnl = entry - current_price
+        
+        # === TRAILING STOP LOGIC ===
+        if current_pnl >= TRAILING_TRIGGER:
+            # Move SL to breakeven + buffer, then trail
+            if side == "BUY":
+                new_sl = entry + BREAKEVEN_BUFFER + ((current_pnl - TRAILING_TRIGGER) // TRAILING_STEP) * TRAILING_STEP
+                if new_sl > trade["sl"]:
+                    old_sl = trade["sl"]
+                    trade["sl"] = new_sl
+                    sl = new_sl
+                    if not trade.get("trailing_logged"):
+                        print(f"\n🔒 TRAILING: {side} SL moved {old_sl:.2f} → {new_sl:.2f} (locking ${current_pnl:.2f} profit)")
+                        trade["trailing_logged"] = True
+            else:  # SELL
+                new_sl = entry - BREAKEVEN_BUFFER - ((current_pnl - TRAILING_TRIGGER) // TRAILING_STEP) * TRAILING_STEP
+                if new_sl < trade["sl"]:
+                    old_sl = trade["sl"]
+                    trade["sl"] = new_sl
+                    sl = new_sl
+                    if not trade.get("trailing_logged"):
+                        print(f"\n🔒 TRAILING: {side} SL moved {old_sl:.2f} → {new_sl:.2f} (locking ${current_pnl:.2f} profit)")
+                        trade["trailing_logged"] = True
+        
+        # === TIME-BASED EXIT ===
+        hold_minutes = (time.time() - trade.get("open_timestamp", time.time())) / 60
+        if hold_minutes >= MAX_HOLD_MINUTES:
+            exit_reason = f"TIME EXIT ({int(hold_minutes)}min)"
+            exit_price = current_price
+        
+        # === STANDARD SL/TP CHECK ===
+        if exit_reason is None:
+            if side == "BUY":
+                if current_price <= sl:
+                    exit_reason = "TRAILING SL" if trade.get("trailing_logged") else "SL HIT"
+                    exit_price = sl
+                elif current_price >= tp:
+                    exit_reason = "TP HIT"
+                    exit_price = tp
+            else:  # SELL
+                if current_price >= sl:
+                    exit_reason = "TRAILING SL" if trade.get("trailing_logged") else "SL HIT"
+                    exit_price = sl
+                elif current_price <= tp:
+                    exit_reason = "TP HIT"
+                    exit_price = tp
         
         if exit_reason:
             if side == "BUY":
@@ -404,7 +454,8 @@ def check_trade_exit(current_price):
             emoji = "✅" if pnl > 0 else "❌"
             streak_info = f" | Losses: {consecutive_losses}" if consecutive_losses > 0 else ""
             rr_achieved = abs(pnl) / SL_PIPS
-            print(f"\n{emoji} CLOSED {side} @ {exit_price:.2f} | PnL: {pnl:+.2f} ({rr_achieved:.1f}R) | {exit_reason}")
+            trail_info = " (TRAILED)" if trade.get("trailing_logged") else ""
+            print(f"\n{emoji} CLOSED {side} @ {exit_price:.2f} | PnL: {pnl:+.2f} ({rr_achieved:.1f}R) | {exit_reason}{trail_info}")
             print(f"   Hold: {hold_time_minutes}min | Session: {trade.get('entry_session', 'N/A')}{streak_info}")
             trades_to_close.append(trade)
     
