@@ -3,3 +3,9 @@ simplejson
 openai
 python-dotenv
 pinecone-client
+numpy
+pandas
+requests
+langchain
+langchain-openai
+langchain-pinecone

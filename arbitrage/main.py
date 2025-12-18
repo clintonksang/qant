@@ -1,0 +1,317 @@
+"""
+Currency Pair Arbitrage Bot - Main Entry Point
+Monitors multiple currency pairs for correlation divergence opportunities
+
+Uses WebSocket connection to Tiingo for real-time FX data
+"""
+
+import simplejson as json
+from websocket import create_connection
+import datetime
+import os
+import time
+import ssl
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Load environment from parent directory
+load_dotenv(Path(__file__).parent.parent / ".env")
+
+# Import our modules
+from config import (
+    ALL_TICKERS, 
+    POSITIVE_PAIRS, 
+    NEGATIVE_PAIRS,
+    BUFFER_SIZE,
+    MIN_DATA_POINTS,
+    LEARNING_TRADES_REQUIRED,
+    get_session
+)
+from correlation_engine import CorrelationEngine
+from signal_detector import SignalDetector
+from arbitrage_brain import evaluate_signal, analyze_market_regime
+from position_manager import PositionManager
+import pair_memory
+
+# ============================================================
+# INITIALIZATION
+# ============================================================
+
+TIINGO_KEY = os.getenv("TIINGO_KEY")
+if not TIINGO_KEY:
+    raise ValueError("TIINGO_KEY not set in environment")
+
+print("🚀 Arbitrage Bot Starting...")
+print(f"📡 Connecting to Tiingo WebSocket...")
+
+# WebSocket connection
+ws = create_connection(
+    "wss://api.tiingo.com/fx",
+    sslopt={"cert_reqs": ssl.CERT_NONE}
+)
+
+# Subscribe to all currency pairs
+print(f"📈 Subscribing to {len(ALL_TICKERS)} pairs: {', '.join(ALL_TICKERS)}")
+ws.send(json.dumps({
+    'eventName': 'subscribe',
+    'authorization': TIINGO_KEY,
+    'eventData': {'tickers': ALL_TICKERS}
+}))
+
+# Initialize components
+correlation_engine = CorrelationEngine()
+signal_detector = SignalDetector()
+position_manager = PositionManager()
+
+# Price buffers for each ticker (rolling window)
+price_buffers = {ticker: [] for ticker in ALL_TICKERS}
+candle_buffers = {ticker: {"high": 0, "low": 99999, "close": 0, "open": 0} for ticker in ALL_TICKERS}
+
+# State tracking
+current_minute = None
+last_correlation_check = 0
+last_regime_check = 0
+warmup_complete = False
+ticks_received = {ticker: 0 for ticker in ALL_TICKERS}
+
+CORRELATION_CHECK_INTERVAL = 60      # Check correlations every 60 seconds
+REGIME_CHECK_INTERVAL = 900          # Check market regime every 15 minutes
+STATUS_PRINT_INTERVAL = 300          # Print status every 5 minutes
+last_status_print = 0
+
+print(f"\n{'='*60}")
+print(f"🎯 ARBITRAGE BOT INITIALIZED")
+print(f"{'='*60}")
+print(f"   Monitoring Pairs:")
+for p in POSITIVE_PAIRS:
+    print(f"   + {p['name']}: {p['pair_a'].upper()}/{p['pair_b'].upper()} (corr: {p['expected_corr']})")
+for p in NEGATIVE_PAIRS:
+    print(f"   - {p['name']}: {p['pair_a'].upper()}/{p['pair_b'].upper()} (corr: {p['expected_corr']})")
+print(f"{'='*60}")
+print(f"\n⏳ Warming up... Need {MIN_DATA_POINTS} data points per pair\n")
+
+# ============================================================
+# MAIN LOOP
+# ============================================================
+
+while True:
+    try:
+        # Receive WebSocket message
+        msg = json.loads(ws.recv())
+        
+        # Skip non-quote messages
+        if 'data' not in msg or msg['data'][0] != 'Q':
+            continue
+        
+        # Parse tick data
+        ticker = msg['data'][1].lower()
+        price = msg['data'][5]
+        timestamp = datetime.datetime.fromisoformat(msg['data'][2])
+        
+        # Skip unknown tickers
+        if ticker not in price_buffers:
+            continue
+        
+        ticks_received[ticker] += 1
+        
+        # Update candle
+        candle = candle_buffers[ticker]
+        if candle['open'] == 0:
+            candle['open'] = price
+        candle['high'] = max(candle['high'], price)
+        candle['low'] = min(candle['low'], price)
+        candle['close'] = price
+        
+        # Initialize minute tracking
+        if current_minute is None:
+            current_minute = timestamp.minute
+        
+        # ============================================================
+        # CHECK POSITION EXITS (Every tick)
+        # ============================================================
+        if position_manager.active_positions:
+            closed = position_manager.check_exits(price_buffers, signal_detector)
+            
+            # Save closed positions to Pinecone for learning
+            for pos in closed:
+                try:
+                    # Reconstruct signal from position
+                    signal_for_learning = {
+                        'pair_name': pos['pair_name'],
+                        'pair_a': pos['pair_a'],
+                        'pair_b': pos['pair_b'],
+                        'price_a': pos['entry_a'],
+                        'price_b': pos['entry_b'],
+                        'spread': pos.get('entry_spread', 0),
+                        'z_score': pos['entry_z_score'],
+                        'mean_spread': 0,  # Not stored
+                        'correlation': pos.get('entry_correlation', 0.95),
+                        'expected_corr': 0.95,
+                        'correlation_health': 'HEALTHY',
+                        'is_positive_pair': True,
+                        'signal_type': 'DIVERGENCE',
+                        'strength': pos.get('signal_strength', 'MODERATE'),
+                        'action_a': pos['action_a'],
+                        'action_b': pos['action_b'],
+                        'timestamp': pos['timestamp']
+                    }
+                    
+                    pair_memory.save_arbitrage_trade(
+                        signal=signal_for_learning,
+                        outcome=pos['outcome'],
+                        pnl_a=pos['pnl_a'],
+                        pnl_b=pos['pnl_b'],
+                        hold_time_minutes=pos['hold_minutes'],
+                        exit_reason=pos['exit_reason'],
+                        exit_z_score=pos['exit_z_score']
+                    )
+                except Exception as e:
+                    print(f"⚠️ Failed to save learning: {e}")
+        
+        # ============================================================
+        # END OF MINUTE PROCESSING
+        # ============================================================
+        if timestamp.minute != current_minute:
+            current_time = time.time()
+            
+            # Store candle close prices
+            for t in ALL_TICKERS:
+                if candle_buffers[t]['close'] > 0:
+                    price_buffers[t].append(candle_buffers[t]['close'])
+                    # Trim buffer
+                    if len(price_buffers[t]) > BUFFER_SIZE:
+                        price_buffers[t].pop(0)
+            
+            # Check warmup status
+            min_data = min(len(price_buffers[t]) for t in ALL_TICKERS)
+            if not warmup_complete and min_data >= MIN_DATA_POINTS:
+                warmup_complete = True
+                print(f"\n✅ WARMUP COMPLETE - All pairs have {min_data}+ data points")
+                print(f"🎯 Arbitrage detection ACTIVE\n")
+            
+            # ============================================================
+            # CORRELATION & SIGNAL DETECTION (Every minute after warmup)
+            # ============================================================
+            if warmup_complete and (current_time - last_correlation_check) > CORRELATION_CHECK_INTERVAL:
+                last_correlation_check = current_time
+                
+                # Calculate correlations
+                correlations = correlation_engine.calculate_all(price_buffers)
+                
+                # Check for divergence signals
+                signals = signal_detector.check_divergences(correlations, price_buffers)
+                
+                # Process each signal
+                for signal in signals:
+                    # Check if we can open a position
+                    can_open, reason = position_manager.can_open_position(signal['pair_name'])
+                    if not can_open:
+                        print(f"⛔ Cannot trade {signal['pair_name']}: {reason}")
+                        continue
+                    
+                    # Get historical context from Pinecone
+                    history_analysis, history_summary = pair_memory.get_similar_divergences(signal)
+                    
+                    # Check learning mode
+                    learning_progress = pair_memory.get_learning_progress()
+                    learning_mode = learning_progress.get('total_trades', 0) < LEARNING_TRADES_REQUIRED
+                    
+                    if learning_mode:
+                        print(f"\n📚 LEARNING MODE ({learning_progress.get('total_trades', 0)}/{LEARNING_TRADES_REQUIRED} trades)")
+                        # In learning mode, take trades to build history
+                        ai_decision = {
+                            'action': 'TRADE',
+                            'confidence': 6,
+                            'reasoning': 'Learning mode - building history',
+                            'risk_level': 'MEDIUM'
+                        }
+                    else:
+                        # AI evaluation with historical context
+                        ai_decision = evaluate_signal(signal, history_analysis)
+                        print(f"\n🤖 AI Decision: {ai_decision['action']} (Confidence: {ai_decision['confidence']}/10)")
+                        print(f"   Reason: {ai_decision['reasoning']}")
+                        
+                        if history_analysis:
+                            print(f"   History: {history_analysis['similar_count']} similar, {history_analysis['win_rate']*100:.0f}% win rate")
+                    
+                    # Execute trade if AI says go
+                    if ai_decision['action'] in ['TRADE', 'REDUCE_SIZE']:
+                        position_manager.open_position(signal, ai_decision)
+            
+            # ============================================================
+            # MARKET REGIME CHECK (Every 15 minutes)
+            # ============================================================
+            if warmup_complete and (current_time - last_regime_check) > REGIME_CHECK_INTERVAL:
+                last_regime_check = current_time
+                
+                correlations = correlation_engine.calculate_all(price_buffers)
+                regime = analyze_market_regime(correlations, price_buffers)
+                
+                print(f"\n🌍 MARKET REGIME: {regime.get('regime', 'UNKNOWN')}")
+                print(f"   Arb Favorable: {'✅' if regime.get('arb_favorable', True) else '⛔'}")
+                if regime.get('avoid_pairs'):
+                    print(f"   Avoid: {', '.join(regime['avoid_pairs'])}")
+                print(f"   Notes: {regime.get('notes', 'N/A')}")
+            
+            # ============================================================
+            # PERIODIC STATUS PRINT
+            # ============================================================
+            if warmup_complete and (current_time - last_status_print) > STATUS_PRINT_INTERVAL:
+                last_status_print = current_time
+                
+                session = get_session(timestamp.hour)
+                print(f"\n{'='*60}")
+                print(f"📊 STATUS UPDATE - {timestamp.strftime('%H:%M')} UTC ({session})")
+                print(f"{'='*60}")
+                
+                # Correlation status
+                correlation_engine.print_status()
+                
+                # Position status
+                position_manager.print_status()
+                
+                # Spread status
+                if correlations:
+                    spreads = signal_detector.get_current_spreads(correlations, price_buffers)
+                    print(f"\n📈 SPREAD STATUS:")
+                    for name, data in spreads.items():
+                        z = data['z_score']
+                        status = data['status']
+                        emoji = '🔴' if status == 'SIGNAL' else '🟡' if status == 'ELEVATED' else '🟢'
+                        print(f"   {emoji} {name}: Z={z:.2f} ({status})")
+            
+            # Reset candles for new minute
+            current_minute = timestamp.minute
+            for t in ALL_TICKERS:
+                candle_buffers[t] = {"high": 0, "low": 99999, "close": 0, "open": 0}
+        
+        # ============================================================
+        # LIVE PRICE DISPLAY (Tick level)
+        # ============================================================
+        else:
+            # Show live prices
+            if warmup_complete:
+                pos_info = ""
+                if position_manager.active_positions:
+                    status = position_manager.get_status()
+                    pos_info = f" | Positions: {status['active_positions']} | PnL: {status['total_pnl']:+.1f}"
+                
+                print(f"\r💱 {ticker.upper()}: {price:.5f}{pos_info}    ", end="", flush=True)
+            else:
+                # During warmup, show progress
+                min_data = min(len(price_buffers[t]) for t in ALL_TICKERS if ticks_received[t] > 0)
+                print(f"\r⏳ Warming up: {min_data}/{MIN_DATA_POINTS} points | {ticker.upper()}: {price:.5f}    ", end="", flush=True)
+    
+    except KeyboardInterrupt:
+        print("\n\n🛑 Shutting down...")
+        if position_manager.active_positions:
+            print(f"⚠️ Closing {len(position_manager.active_positions)} open positions...")
+            position_manager.force_close_all(price_buffers, "SHUTDOWN")
+        print("👋 Goodbye!")
+        break
+    
+    except Exception as e:
+        if str(e) not in ["0", ""]:  # Ignore subscription confirmations
+            print(f"\n⚠️ Error: {e}")
+        time.sleep(1)
+
