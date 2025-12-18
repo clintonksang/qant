@@ -13,8 +13,17 @@ from config import (
     STOP_LOSS_ZSCORE,
     Z_SCORE_EXIT_THRESHOLD,
     CONSECUTIVE_LOSS_PAUSE,
-    MIN_MINUTES_BETWEEN_TRADES
+    MIN_MINUTES_BETWEEN_TRADES,
+    PAIR_INFO
 )
+
+
+def get_pip_multiplier(pair):
+    """Get the correct pip multiplier for a currency pair."""
+    pip_value = PAIR_INFO.get(pair, {}).get('pip_value', 0.0001)
+    # Convert to pips: if pip_value is 0.0001, multiply by 10000
+    # if pip_value is 0.01 (JPY pairs), multiply by 100
+    return 1 / pip_value
 
 # CSV for trade logging
 CSV_FILE = Path(__file__).parent / "arbitrage_trades.csv"
@@ -177,16 +186,19 @@ class PositionManager:
             if current_a == 0 or current_b == 0:
                 continue
             
-            # Calculate current P&L for each leg
+            # Calculate current P&L for each leg (using correct pip multiplier)
+            pip_mult_a = get_pip_multiplier(pair_a)
+            pip_mult_b = get_pip_multiplier(pair_b)
+            
             if position['action_a'] == 'BUY':
-                pnl_a = (current_a - position['entry_a']) * 10000  # Convert to pips
+                pnl_a = (current_a - position['entry_a']) * pip_mult_a
             else:
-                pnl_a = (position['entry_a'] - current_a) * 10000
+                pnl_a = (position['entry_a'] - current_a) * pip_mult_a
             
             if position['action_b'] == 'BUY':
-                pnl_b = (current_b - position['entry_b']) * 10000
+                pnl_b = (current_b - position['entry_b']) * pip_mult_b
             else:
-                pnl_b = (position['entry_b'] - current_b) * 10000
+                pnl_b = (position['entry_b'] - current_b) * pip_mult_b
             
             position['current_pnl'] = pnl_a + pnl_b
             
@@ -328,15 +340,19 @@ class PositionManager:
             current_a = price_buffers.get(pair_a, [position['entry_a']])[-1]
             current_b = price_buffers.get(pair_b, [position['entry_b']])[-1]
             
+            # Use correct pip multiplier
+            pip_mult_a = get_pip_multiplier(pair_a)
+            pip_mult_b = get_pip_multiplier(pair_b)
+            
             if position['action_a'] == 'BUY':
-                pnl_a = (current_a - position['entry_a']) * 10000
+                pnl_a = (current_a - position['entry_a']) * pip_mult_a
             else:
-                pnl_a = (position['entry_a'] - current_a) * 10000
+                pnl_a = (position['entry_a'] - current_a) * pip_mult_a
             
             if position['action_b'] == 'BUY':
-                pnl_b = (current_b - position['entry_b']) * 10000
+                pnl_b = (current_b - position['entry_b']) * pip_mult_b
             else:
-                pnl_b = (position['entry_b'] - current_b) * 10000
+                pnl_b = (position['entry_b'] - current_b) * pip_mult_b
             
             self._close_position(
                 position, current_a, current_b,
