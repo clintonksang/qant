@@ -279,6 +279,14 @@ while True:
                         status = data['status']
                         emoji = '🔴' if status == 'SIGNAL' else '🟡' if status == 'ELEVATED' else '🟢'
                         print(f"   {emoji} {name}: Z={z:.2f} ({status})")
+                
+                # Correlation trends
+                print(f"\n📉 CORRELATION TRENDS:")
+                for corr in correlations:
+                    trend = correlation_engine.get_correlation_trend(corr['name'], periods=10)
+                    if trend['trend'] not in ['UNKNOWN', 'BUILDING']:
+                        trend_emoji = '📈' if trend['trend'] == 'STRENGTHENING' else '📉' if trend['trend'] == 'WEAKENING' else '➡️'
+                        print(f"   {trend_emoji} {corr['name']}: {trend['message']}")
             
             # Reset candles for new minute
             current_minute = timestamp.minute

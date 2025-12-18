@@ -9,7 +9,8 @@ from config import (
     Z_SCORE_ENTRY_THRESHOLD, 
     Z_SCORE_EXTREME_THRESHOLD,
     Z_SCORE_EXIT_THRESHOLD,
-    MIN_DATA_POINTS
+    MIN_DATA_POINTS,
+    SKIP_EXTREME_ZSCORE
 )
 
 
@@ -112,6 +113,12 @@ class SignalDetector:
             
             # Check if Z-score exceeds entry threshold
             if abs(z_score) > Z_SCORE_ENTRY_THRESHOLD:
+                
+                # SKIP EXTREME Z-SCORES - These are regime changes, not mean reversion
+                if SKIP_EXTREME_ZSCORE and abs(z_score) > Z_SCORE_EXTREME_THRESHOLD:
+                    print(f"⛔ SKIPPED {pair_name}: Z-Score {z_score:.2f} too extreme (regime change)")
+                    continue
+                
                 # Determine trading direction based on Z-score sign
                 # Positive Z-score: Pair A overvalued relative to B → SELL A, BUY B
                 # Negative Z-score: Pair B overvalued relative to A → BUY A, SELL B
@@ -124,11 +131,11 @@ class SignalDetector:
                     action_b = 'SELL'
                 
                 # Determine signal strength
-                if abs(z_score) > Z_SCORE_EXTREME_THRESHOLD:
-                    strength = 'EXTREME'
-                    warning = 'Extreme divergence - may be regime change!'
+                if abs(z_score) > 2.5:
+                    strength = 'STRONG'
+                    warning = 'Strong divergence - monitor closely'
                 else:
-                    strength = 'STRONG' if abs(z_score) > 2.5 else 'MODERATE'
+                    strength = 'MODERATE'
                     warning = None
                 
                 signal = {

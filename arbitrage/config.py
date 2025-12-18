@@ -43,14 +43,18 @@ NEGATIVE_PAIRS = [
         "name": "EUR_CHF_MIRROR",
         "description": "Most stable negative correlation - Euro and Swiss Franc both vs Dollar"
     },
-    {
-        "pair_a": "audusd",
-        "pair_b": "usdcad",
-        "expected_corr": -0.85,
-        "name": "COMMODITY_SPLIT",
-        "description": "AUD (metals) vs CAD (oil) - different commodity exposures"
-    },
+    # DISABLED: COMMODITY_SPLIT has 0% win rate - not mean reverting
+    # {
+    #     "pair_a": "audusd",
+    #     "pair_b": "usdcad",
+    #     "expected_corr": -0.85,
+    #     "name": "COMMODITY_SPLIT",
+    #     "description": "AUD (metals) vs CAD (oil) - different commodity exposures"
+    # },
 ]
+
+# Pairs to skip based on historical performance
+DISABLED_PAIRS = ["COMMODITY_SPLIT"]  # 0% win rate - not mean reverting
 
 # All tickers to subscribe to
 ALL_TICKERS = list(set(
@@ -66,6 +70,7 @@ ALL_TICKERS = list(set(
 Z_SCORE_ENTRY_THRESHOLD = 2.0      # Minimum Z-score to generate signal
 Z_SCORE_EXTREME_THRESHOLD = 3.0    # Extreme divergence - may be regime change
 Z_SCORE_EXIT_THRESHOLD = 0.5       # Close when spread normalizes
+SKIP_EXTREME_ZSCORE = True         # Skip trades with Z-score > 3.0 (regime changes)
 
 # Correlation Health
 CORRELATION_DRIFT_WARNING = 0.15   # Warn if correlation drifts by this much
