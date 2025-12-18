@@ -14,7 +14,8 @@ from config import (
     Z_SCORE_EXIT_THRESHOLD,
     CONSECUTIVE_LOSS_PAUSE,
     MIN_MINUTES_BETWEEN_TRADES,
-    PAIR_INFO
+    PAIR_INFO,
+    PAIR_MAX_HOLD  # v2: Per-pair hold limits
 )
 
 
@@ -220,9 +221,11 @@ class PositionManager:
             if abs(z_score) < Z_SCORE_EXIT_THRESHOLD:
                 exit_reason = "MEAN_REVERSION"
             
-            # 2. Time-based exit
+            # 2. Time-based exit (v2: per-pair limits)
             hold_minutes = (time.time() - position['open_time']) / 60
-            if hold_minutes >= MAX_HOLD_MINUTES:
+            pair_name = position['pair_name']
+            max_hold = PAIR_MAX_HOLD.get(pair_name, MAX_HOLD_MINUTES)
+            if hold_minutes >= max_hold:
                 exit_reason = "TIME_EXIT"
             
             # 3. Stop loss - Z-score went further against us
