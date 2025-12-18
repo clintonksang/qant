@@ -1,0 +1,2 @@
+TradeID,Timestamp,PairName,PairA,ActionA,EntryA,ExitA,PnlA,PairB,ActionB,EntryB,ExitB,PnlB,EntryZScore,ExitZScore,TotalPnL,HoldMinutes,Status,ExitReason
+
