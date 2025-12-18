@@ -59,12 +59,12 @@ MOMENTUM_LOOKBACK = 10        # Minutes to check for momentum
 TREND_REFRESH_FAST = 300      # 5 min refresh during volatile sessions
 TREND_REFRESH_SLOW = 900      # 15 min refresh during calm sessions
 
-# ===== PRICE MOVEMENT LOGGING (NEW) =====
+# ===== PRICE MOVEMENT LOGGING (v5: added 1m/3m trends) =====
 PRICE_LOG_FILE = Path(__file__).parent / "price_movements.csv"
 PRICE_LOG_HEADERS = [
     "Timestamp", "Price", "Open", "High", "Low", "Close",
-    "Change_1min", "Change_5min", "Change_10min", "Change_15min",
-    "SMA8", "RSI", "Trend_1H", "Trend_15m", "Trend_5m", 
+    "Change_1min", "Change_3min", "Change_5min", "Change_10min", "Change_15min",
+    "SMA8", "RSI", "Trend_1H", "Trend_1m", "Trend_3m", "Trend_5m", "Trend_15m",
     "Momentum", "Structure", "Session"
 ]
 
@@ -76,10 +76,11 @@ def init_price_log():
 
 def log_price_movement(timestamp, price, candle_data, closes_list, sma, rsi, 
                         trend_1h, trend_analysis, session):
-    """Log price movement for learning patterns."""
+    """Log price movement for learning patterns (v5: includes 1m/3m)."""
     try:
         # Calculate price changes over different periods
         change_1m = closes_list[-1] - closes_list[-2] if len(closes_list) >= 2 else 0
+        change_3m = closes_list[-1] - closes_list[-4] if len(closes_list) >= 4 else 0
         change_5m = closes_list[-1] - closes_list[-6] if len(closes_list) >= 6 else 0
         change_10m = closes_list[-1] - closes_list[-11] if len(closes_list) >= 11 else 0
         change_15m = closes_list[-1] - closes_list[-16] if len(closes_list) >= 16 else 0
@@ -92,14 +93,17 @@ def log_price_movement(timestamp, price, candle_data, closes_list, sma, rsi,
             f"{candle_data['low']:.2f}",
             f"{candle_data['close']:.2f}",
             f"{change_1m:.2f}",
+            f"{change_3m:.2f}",
             f"{change_5m:.2f}",
             f"{change_10m:.2f}",
             f"{change_15m:.2f}",
             f"{sma:.2f}",
             f"{rsi:.0f}",
             trend_1h,
-            trend_analysis.get('medium_trend', 'N/A'),
-            trend_analysis.get('short_trend', 'N/A'),
+            trend_analysis.get('trend_1m', 'N/A'),    # NEW
+            trend_analysis.get('trend_3m', 'N/A'),    # NEW
+            trend_analysis.get('short_trend', 'N/A'),  # 5m
+            trend_analysis.get('medium_trend', 'N/A'), # 15m
             trend_analysis.get('momentum', 'N/A'),
             trend_analysis.get('structure', 'N/A'),
             session
@@ -139,31 +143,71 @@ def check_momentum_override(side, closes_list):
     
     return False, f"Momentum OK (${recent_change:+.2f} in {MOMENTUM_LOOKBACK}min)"
 
-def check_short_term_trend_conflict(side, trend_analysis):
+def check_short_term_trend_conflict(side, trend_analysis, big_trend="NEUTRAL", price=0, sma=0, rsi=50):
     """
-    Check if short-term trends conflict with trade direction.
-    If both 5m and 15m are opposite to trade, block it.
+    v5: Enhanced trend conflict check with 1m and 3m ultra-short trends.
+    Prevents entering against immediate price direction.
     """
-    short_trend = trend_analysis.get('short_trend', 'NEUTRAL')
-    medium_trend = trend_analysis.get('medium_trend', 'NEUTRAL')
+    trend_1m = trend_analysis.get('trend_1m', 'NEUTRAL')
+    trend_3m = trend_analysis.get('trend_3m', 'NEUTRAL')
+    change_1m = trend_analysis.get('change_1m', 0)
+    change_3m = trend_analysis.get('change_3m', 0)
+    short_trend = trend_analysis.get('short_trend', 'NEUTRAL')  # 5m
+    medium_trend = trend_analysis.get('medium_trend', 'NEUTRAL')  # 15m
     momentum = trend_analysis.get('momentum', 'STABLE')
     structure = trend_analysis.get('structure', '')
     
-    # If trying to SELL but short-term is strongly bullish
+    # ===== CRITICAL: 1m and 3m ULTRA-SHORT CONFLICT =====
+    # If the last 1-3 minutes are moving against your trade, WAIT
     if side == "SELL":
-        if short_trend == "BULLISH" and medium_trend == "BULLISH":
-            return True, f"🚫 CONFLICT: 5m & 15m both BULLISH - don't SELL"
-        if momentum == "ACCELERATING_UP" and short_trend == "BULLISH":
-            return True, f"🚫 CONFLICT: Accelerating UP with bullish 5m - don't SELL"
+        # Don't SELL if price just bounced UP
+        if trend_1m == "BULLISH" and change_1m > 0.50:
+            return True, f"🚫 1M BOUNCE: Price up ${change_1m:.2f} in last minute - don't SELL into bounce"
+        if trend_3m == "BULLISH" and change_3m > 1.00:
+            return True, f"🚫 3M RALLY: Price up ${change_3m:.2f} in last 3min - don't SELL into rally"
+        # Don't SELL if 1m AND 3m are both BULLISH
+        if trend_1m == "BULLISH" and trend_3m == "BULLISH":
+            return True, f"🚫 MICRO UPTREND: 1m & 3m both BULLISH - wait for pullback to SELL"
     
-    # If trying to BUY but short-term is strongly bearish
     if side == "BUY":
-        if short_trend == "BEARISH" and medium_trend == "BEARISH":
-            return True, f"🚫 CONFLICT: 5m & 15m both BEARISH - don't BUY"
-        if momentum == "ACCELERATING_DOWN" and short_trend == "BEARISH":
-            return True, f"🚫 CONFLICT: Accelerating DOWN with bearish 5m - don't BUY"
+        # Don't BUY if price just dumped
+        if trend_1m == "BEARISH" and change_1m < -0.50:
+            return True, f"🚫 1M DUMP: Price down ${abs(change_1m):.2f} in last minute - don't BUY into dump"
+        if trend_3m == "BEARISH" and change_3m < -1.00:
+            return True, f"🚫 3M CRASH: Price down ${abs(change_3m):.2f} in last 3min - don't BUY into crash"
+        # Don't BUY if 1m AND 3m are both BEARISH
+        if trend_1m == "BEARISH" and trend_3m == "BEARISH":
+            return True, f"🚫 MICRO DOWNTREND: 1m & 3m both BEARISH - wait for bounce to BUY"
     
-    # v4 FIX: Avoid choppy consolidation unless momentum is VERY strong
+    # ===== COUNTER-TREND: Stricter requirements when trading against 1H =====
+    if big_trend == "BULLISH" and side == "SELL":
+        # Only allow SELL against BULLISH 1H if ALL short-term confirms bearish
+        if not (medium_trend == "BEARISH" and short_trend == "BEARISH" and 
+                trend_3m == "BEARISH" and momentum == "ACCELERATING_DOWN"):
+            return True, f"🚫 FIGHTING 1H BULLISH: Need 15m+5m+3m BEARISH + ACCEL_DOWN to SELL"
+        # Also check RSI
+        if rsi > 45:
+            return True, f"🚫 RSI {rsi:.0f} too high for counter-trend SELL"
+    
+    if big_trend == "BEARISH" and side == "BUY":
+        # Only allow BUY against BEARISH 1H if ALL short-term confirms bullish
+        if not (medium_trend == "BULLISH" and short_trend == "BULLISH" and 
+                trend_3m == "BULLISH" and momentum == "ACCELERATING_UP"):
+            return True, f"🚫 FIGHTING 1H BEARISH: Need 15m+5m+3m BULLISH + ACCEL_UP to BUY"
+        # Also check RSI
+        if rsi < 55:
+            return True, f"🚫 RSI {rsi:.0f} too low for counter-trend BUY"
+    
+    # ===== STRUCTURE: Don't trade against strong structure =====
+    if side == "SELL" and "HIGHER_HIGHS_LOWS" in structure:
+        if not (medium_trend == "BEARISH" and short_trend == "BEARISH" and trend_3m == "BEARISH"):
+            return True, f"🚫 UPTREND STRUCTURE: Need all timeframes BEARISH to SELL against uptrend"
+    
+    if side == "BUY" and "LOWER_HIGHS_LOWS" in structure:
+        if not (medium_trend == "BULLISH" and short_trend == "BULLISH" and trend_3m == "BULLISH"):
+            return True, f"🚫 DOWNTREND STRUCTURE: Need all timeframes BULLISH to BUY against downtrend"
+    
+    # ===== CHOPPY: Avoid low-conviction setups =====
     if "CONSOLIDATING" in structure or "Range" in structure:
         if momentum == "STABLE":
             return True, f"🚫 CHOPPY: Consolidating with STABLE momentum - wait for breakout"
@@ -196,27 +240,50 @@ def analyze_price_trend(prices):
     """
     Analyze price trend across multiple timeframes.
     Returns a dict with trend info for the AI brain.
+    v5: Added 1m and 3m ultra-short trends for better entry timing
     """
     if len(prices) < 8:
         return {
+            "trend_1m": "NEUTRAL",
+            "trend_3m": "NEUTRAL",
             "short_trend": "NEUTRAL",
             "medium_trend": "NEUTRAL", 
             "momentum": "NEUTRAL",
             "strength": 50,
             "structure": "Building data",
+            "change_1m": 0,
+            "change_3m": 0,
             "short_change": 0,
             "medium_change": 0,
             "description": "Building data"
         }
     
-    # Short-term (last 3-5 candles) - for scalping
+    # ===== ULTRA-SHORT: 1-minute trend (last candle vs previous) =====
+    if len(prices) >= 2:
+        change_1m = prices[-1] - prices[-2]
+        # Very sensitive: $0.15 move is significant for scalping
+        trend_1m = "BULLISH" if change_1m > 0.15 else "BEARISH" if change_1m < -0.15 else "NEUTRAL"
+    else:
+        change_1m = 0
+        trend_1m = "NEUTRAL"
+    
+    # ===== ULTRA-SHORT: 3-minute trend (last 3 candles) =====
+    if len(prices) >= 4:
+        change_3m = prices[-1] - prices[-4]
+        # $0.25 move over 3 minutes
+        trend_3m = "BULLISH" if change_3m > 0.25 else "BEARISH" if change_3m < -0.25 else "NEUTRAL"
+    else:
+        change_3m = 0
+        trend_3m = "NEUTRAL"
+    
+    # Short-term (last 3-5 candles) - 5min trend
     short_len = min(5, len(prices))
     short_prices = prices[-short_len:]
     short_change = short_prices[-1] - short_prices[0]
     # Lower thresholds for gold scalping (0.30 = $0.30 move)
     short_trend = "BULLISH" if short_change > 0.30 else "BEARISH" if short_change < -0.30 else "NEUTRAL"
     
-    # Medium-term (last 8-15 candles) - for direction  
+    # Medium-term (last 8-15 candles) - 15min trend
     medium_len = min(15, len(prices))
     medium_prices = prices[-medium_len:]
     medium_change = medium_prices[-1] - medium_prices[0]
@@ -270,8 +337,12 @@ def analyze_price_trend(prices):
     description = f"{medium_trend} trend with {momentum.lower().replace('_', ' ')} momentum. {structure}. Strength: {strength}/100"
     
     return {
-        "short_trend": short_trend,
-        "medium_trend": medium_trend,
+        "trend_1m": trend_1m,           # NEW: Ultra-short 1-min
+        "trend_3m": trend_3m,           # NEW: Ultra-short 3-min
+        "change_1m": round(change_1m, 2),  # NEW: 1-min price change
+        "change_3m": round(change_3m, 2),  # NEW: 3-min price change
+        "short_trend": short_trend,     # 5-min trend
+        "medium_trend": medium_trend,   # 15-min trend
         "momentum": momentum,
         "strength": strength,
         "structure": structure,
@@ -586,10 +657,11 @@ def check_trade_exit(current_price):
 
 init_csv()
 init_price_log()  # Initialize price movement logging
-print("🚀 Rex v4 (Trailing Optimized) is Live...")
+print("🚀 Rex v5 (Ultra-Short Trends) is Live...")
+print(f"   🔬 NEW: 1m & 3m trend analysis for precise entry timing")
 print(f"   📊 R:R Fix: Trail at +${TRAILING_TRIGGER}, lock in ${BREAKEVEN_BUFFER} minimum")
 print(f"   ⚡ Momentum protection: Block counter-trend when price moves ${MOMENTUM_THRESHOLD}+ in {MOMENTUM_LOOKBACK}min")
-print(f"   🚫 Choppy filter: Avoid consolidation with stable momentum")
+print(f"   🚫 Counter-trend: Requires 15m+5m+3m alignment + RSI confirmation")
 
 while True:
     try:
@@ -656,8 +728,9 @@ while True:
             confidence = trade.get('confidence', 5)
             print(f"\n{'='*60}")
             print(f"📊 Close: {candle['close']:.2f} | SMA8: {sma8:.2f} ({sma_pos}) | RSI: {rsi:.0f}")
-            print(f"📈 1H: {big_trend} | 15m: {trend_analysis['medium_trend']} | 5m: {trend_analysis['short_trend']}")
-            print(f"💨 Momentum: {trend_analysis['momentum']} | Structure: {trend_analysis['structure']}")
+            # v5: Show all timeframes including 1m and 3m
+            print(f"📈 1H: {big_trend} | 15m: {trend_analysis['medium_trend']} | 5m: {trend_analysis['short_trend']} | 3m: {trend_analysis.get('trend_3m', 'N/A')} | 1m: {trend_analysis.get('trend_1m', 'N/A')}")
+            print(f"💨 Momentum: {trend_analysis['momentum']} | 1m: ${trend_analysis.get('change_1m', 0):+.2f} | 3m: ${trend_analysis.get('change_3m', 0):+.2f}")
             print(f"🤖 AI: {trade['decision']} (Confidence: {confidence}/10){warmup_status}")
             
             # Log price movement for learning
@@ -681,9 +754,11 @@ while True:
                         can_trade = False
                         filter_reason = momentum_reason
                     
-                    # ===== SHORT-TERM TREND CONFLICT CHECK (NEW) =====
+                    # ===== SHORT-TERM TREND CONFLICT CHECK (v5: with 1m/3m ultra-short) =====
                     if can_trade:
-                        trend_blocked, trend_reason = check_short_term_trend_conflict(trade['decision'], trend_analysis)
+                        trend_blocked, trend_reason = check_short_term_trend_conflict(
+                            trade['decision'], trend_analysis, big_trend, candle['close'], sma8, rsi
+                        )
                         if trend_blocked:
                             print(f"\n{trend_reason}")
                             can_trade = False
