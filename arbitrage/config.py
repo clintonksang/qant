@@ -24,13 +24,7 @@ POSITIVE_PAIRS = [
         "name": "COMMODITY_TWINS",
         "description": "Commodity twins - both sensitive to China demand & risk sentiment"
     },
-    {
-        "pair_a": "eurjpy",
-        "pair_b": "gbpjpy",
-        "expected_corr": 0.90,
-        "name": "JPY_CROSSES",
-        "description": "JPY crosses - driven by risk-on/risk-off sentiment"
-    },
+     
 ]
 
 # Negatively Correlated Pairs (move opposite)
@@ -90,7 +84,7 @@ PAIR_MAX_HOLD = {
     "EUR_GBP": 10,          # EUR_GBP underperforming - faster exit
     "EUR_CHF_MIRROR": 15,   # Star performer - give it room
     "COMMODITY_TWINS": 12,  # Moderate
-    "JPY_CROSSES": 10,      # JPY volatile - faster exit
+    # "JPY_CROSSES": 10,      # JPY volatile - faster exit
 }
 
 # Data Requirements
