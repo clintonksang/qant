@@ -1,0 +1,83 @@
+# ============================================================
+# Docker Compose for QuantAgent Arbitrage Bot
+# ============================================================
+version: '3.8'
+
+services:
+  # ============================================================
+  # Arbitrage Bot - Main Trading Service
+  # ============================================================
+  arbitrage-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: quantagent-arbitrage
+    restart: unless-stopped
+    
+    # Environment variables from .env file
+    env_file:
+      - .env
+    
+    # Override environment variables if needed
+    environment:
+      - PYTHONUNBUFFERED=1
+      # Trading Mode: Set to 'true' for live trading
+      # - LIVE_TRADING=true
+      # - MT5_VOLUME=0.01
+    
+    # Mount volumes for persistent data
+    volumes:
+      # Trade logs (persist across restarts)
+      - ./arbitrage/arbitrage_trades.csv:/app/arbitrage/arbitrage_trades.csv
+      # Hourly reviews (if used)
+      - ./hourly_reviews:/app/hourly_reviews
+    
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+    
+    # Network for potential future services
+    networks:
+      - quantagent-network
+
+  # ============================================================
+  # Optional: Log viewer with tail
+  # ============================================================
+  # log-viewer:
+  #   image: alpine:latest
+  #   container_name: quantagent-logs
+  #   command: tail -f /logs/arbitrage_trades.csv
+  #   volumes:
+  #     - ./arbitrage:/logs:ro
+  #   depends_on:
+  #     - arbitrage-bot
+  #   networks:
+  #     - quantagent-network
+
+networks:
+  quantagent-network:
+    driver: bridge
+
+# ============================================================
+# Usage:
+# ============================================================
+# 
+# Build and start (paper trading):
+#   docker-compose up -d --build
+#
+# View logs:
+#   docker-compose logs -f arbitrage-bot
+#
+# Stop:
+#   docker-compose down
+#
+# Live trading (edit .env first):
+#   LIVE_TRADING=true docker-compose up -d
+#
+# Rebuild after code changes:
+#   docker-compose up -d --build --force-recreate
+# ============================================================
+
