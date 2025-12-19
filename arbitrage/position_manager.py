@@ -1,6 +1,7 @@
 """
 Position Manager for Currency Pair Arbitrage
 Manages hedged positions across multiple currency pairs
+Integrates with MT5 for live trade execution
 """
 
 import time
@@ -15,7 +16,10 @@ from config import (
     CONSECUTIVE_LOSS_PAUSE,
     MIN_MINUTES_BETWEEN_TRADES,
     PAIR_INFO,
-    PAIR_MAX_HOLD  # v2: Per-pair hold limits
+    PAIR_MAX_HOLD,
+    LIVE_TRADING,
+    MT5_VOLUME,
+    MT5_MAGIC
 )
 
 
@@ -26,14 +30,15 @@ def get_pip_multiplier(pair):
     # if pip_value is 0.01 (JPY pairs), multiply by 100
     return 1 / pip_value
 
+
 # CSV for trade logging
 CSV_FILE = Path(__file__).parent / "arbitrage_trades.csv"
 CSV_HEADERS = [
     "TradeID", "Timestamp", "PairName", 
-    "PairA", "ActionA", "EntryA", "ExitA", "PnlA",
-    "PairB", "ActionB", "EntryB", "ExitB", "PnlB",
+    "PairA", "ActionA", "EntryA", "ExitA", "PnlA", "TicketA",
+    "PairB", "ActionB", "EntryB", "ExitB", "PnlB", "TicketB",
     "EntryZScore", "ExitZScore", "TotalPnL", 
-    "HoldMinutes", "Status", "ExitReason"
+    "HoldMinutes", "Status", "ExitReason", "LiveTrade"
 ]
 
 
@@ -41,6 +46,7 @@ class PositionManager:
     """
     Manages arbitrage positions (hedged pairs trades).
     Each position consists of two legs: one for each currency pair.
+    Supports both paper trading and live MT5 execution.
     """
     
     def __init__(self):
@@ -49,6 +55,29 @@ class PositionManager:
         self.consecutive_losses = 0
         self.last_trade_time = {}  # Per-pair cooldown
         self.total_pnl = 0
+        self.live_trading = LIVE_TRADING
+        
+        # Initialize MT5 Executor for live trading
+        self.executor = None
+        if self.live_trading:
+            try:
+                from mt5_executor import MT5Executor
+                self.executor = MT5Executor(volume=MT5_VOLUME, magic=MT5_MAGIC)
+                
+                # Test connection
+                if self.executor.test_connection():
+                    print(f"🟢 LIVE TRADING MODE ENABLED")
+                else:
+                    print(f"⚠️ MT5 connection failed - falling back to paper trading")
+                    self.live_trading = False
+                    self.executor = None
+            except Exception as e:
+                print(f"⚠️ Failed to initialize MT5 Executor: {e}")
+                print(f"📝 Running in PAPER TRADING mode")
+                self.live_trading = False
+                self.executor = None
+        else:
+            print(f"📝 PAPER TRADING MODE (set LIVE_TRADING=true to enable live trades)")
         
         # Initialize CSV
         self._init_csv()
@@ -112,6 +141,7 @@ class PositionManager:
         
         trade_id = int(time.time() * 100) % 10000000000
         
+        # Initialize position with signal data
         position = {
             'id': trade_id,
             'pair_name': pair_name,
@@ -122,11 +152,13 @@ class PositionManager:
             'pair_a': signal['pair_a'],
             'action_a': signal['action_a'],
             'entry_a': signal['price_a'],
+            'ticket_a': None,  # MT5 ticket
             
             # Leg B
             'pair_b': signal['pair_b'],
             'action_b': signal['action_b'],
             'entry_b': signal['price_b'],
+            'ticket_b': None,  # MT5 ticket
             
             # Signal context
             'entry_z_score': signal['z_score'],
@@ -140,22 +172,52 @@ class PositionManager:
             
             # Status
             'status': 'OPEN',
-            'current_pnl': 0
+            'current_pnl': 0,
+            'is_live': self.live_trading
         }
         
+        # ============================================================
+        # EXECUTE LIVE TRADES VIA MT5
+        # ============================================================
+        if self.live_trading and self.executor:
+            print(f"\n🚀 EXECUTING LIVE TRADE...")
+            
+            broker_result = self.executor.execute_arbitrage_entry(signal)
+            
+            if not broker_result['success']:
+                print(f"❌ BROKER EXECUTION FAILED: {broker_result.get('error', 'Unknown error')}")
+                print(f"📝 Trade will NOT be recorded")
+                return None
+            
+            # Store broker tickets and actual execution prices
+            position['ticket_a'] = broker_result['ticket_a']
+            position['ticket_b'] = broker_result['ticket_b']
+            position['entry_a'] = broker_result['price_a']  # Use actual execution price
+            position['entry_b'] = broker_result['price_b']  # Use actual execution price
+            
+            print(f"✅ LIVE TRADE EXECUTED")
+            print(f"   Ticket A: #{position['ticket_a']} @ {position['entry_a']:.5f}")
+            print(f"   Ticket B: #{position['ticket_b']} @ {position['entry_b']:.5f}")
+        
+        # Add position to active list
         self.active_positions.append(position)
         self.last_trade_time[pair_name] = time.time()
         
         # Log opening
+        trade_mode = "🟢 LIVE" if self.live_trading else "📝 PAPER"
         print(f"\n{'='*60}")
-        print(f"📈 OPENED ARBITRAGE POSITION #{len(self.active_positions)}")
+        print(f"📈 OPENED ARBITRAGE POSITION #{len(self.active_positions)} ({trade_mode})")
         print(f"{'='*60}")
         print(f"   Pair: {pair_name}")
         print(f"   Z-Score: {signal['z_score']:.2f} ({signal['strength']})")
         print(f"   Correlation: {signal['correlation']:.3f}")
         print(f"   ")
-        print(f"   LEG A: {signal['action_a']} {signal['pair_a'].upper()} @ {signal['price_a']:.5f}")
-        print(f"   LEG B: {signal['action_b']} {signal['pair_b'].upper()} @ {signal['price_b']:.5f}")
+        print(f"   LEG A: {signal['action_a']} {signal['pair_a'].upper()} @ {position['entry_a']:.5f}")
+        if position['ticket_a']:
+            print(f"          Ticket: #{position['ticket_a']}")
+        print(f"   LEG B: {signal['action_b']} {signal['pair_b'].upper()} @ {position['entry_b']:.5f}")
+        if position['ticket_b']:
+            print(f"          Ticket: #{position['ticket_b']}")
         print(f"   ")
         print(f"   AI Confidence: {ai_decision.get('confidence', 'N/A')}/10")
         print(f"   Risk Level: {ai_decision.get('risk_level', 'N/A')}")
@@ -254,9 +316,25 @@ class PositionManager:
     def _close_position(self, position, exit_a, exit_b, pnl_a, pnl_b, exit_z, reason):
         """
         Close a position and log the result.
+        Executes live close via MT5 if in live trading mode.
         """
         hold_minutes = int((time.time() - position['open_time']) / 60)
         total_pnl = pnl_a + pnl_b
+        
+        # ============================================================
+        # CLOSE LIVE TRADES VIA MT5
+        # ============================================================
+        if position.get('is_live') and self.executor and position.get('ticket_a'):
+            print(f"\n🔒 CLOSING LIVE POSITION: {position['pair_name']}")
+            
+            close_result = self.executor.close_arbitrage_position(position)
+            
+            if close_result['success']:
+                print(f"✅ LIVE POSITION CLOSED SUCCESSFULLY")
+            else:
+                print(f"⚠️ LIVE CLOSE HAD ISSUES - Check MT5 manually")
+                print(f"   Ticket A: #{position['ticket_a']}")
+                print(f"   Ticket B: #{position['ticket_b']}")
         
         # Determine outcome
         if total_pnl > 0:
@@ -287,15 +365,20 @@ class PositionManager:
         self._log_trade(position)
         
         # Print result
+        trade_mode = "🟢 LIVE" if position.get('is_live') else "📝 PAPER"
         print(f"\n{'='*60}")
-        print(f"{emoji} CLOSED POSITION: {position['pair_name']}")
+        print(f"{emoji} CLOSED POSITION: {position['pair_name']} ({trade_mode})")
         print(f"{'='*60}")
         print(f"   Reason: {reason}")
         print(f"   Hold Time: {hold_minutes} minutes")
         print(f"   Z-Score: {position['entry_z_score']:.2f} → {exit_z:.2f}")
         print(f"   ")
         print(f"   LEG A: {pnl_a:+.1f} pips ({position['entry_a']:.5f} → {exit_a:.5f})")
+        if position.get('ticket_a'):
+            print(f"          Ticket: #{position['ticket_a']}")
         print(f"   LEG B: {pnl_b:+.1f} pips ({position['entry_b']:.5f} → {exit_b:.5f})")
+        if position.get('ticket_b'):
+            print(f"          Ticket: #{position['ticket_b']}")
         print(f"   ")
         print(f"   TOTAL PnL: {total_pnl:+.1f} pips")
         print(f"   Session Total: {self.total_pnl:+.1f} pips")
@@ -318,17 +401,20 @@ class PositionManager:
             f"{position['entry_a']:.5f}",
             f"{position.get('exit_a', 0):.5f}",
             f"{position.get('pnl_a', 0):.1f}",
+            position.get('ticket_a', ''),
             position['pair_b'],
             position['action_b'],
             f"{position['entry_b']:.5f}",
             f"{position.get('exit_b', 0):.5f}",
             f"{position.get('pnl_b', 0):.1f}",
+            position.get('ticket_b', ''),
             f"{position['entry_z_score']:.2f}",
             f"{position.get('exit_z_score', 0):.2f}",
             f"{position.get('pnl_a', 0) + position.get('pnl_b', 0):.1f}",
             position.get('hold_minutes', 0),
             position.get('outcome', 'UNKNOWN'),
-            position.get('exit_reason', 'UNKNOWN')
+            position.get('exit_reason', 'UNKNOWN'),
+            position.get('is_live', False)
         ]
         
         with open(CSV_FILE, 'a', newline='') as f:
@@ -370,12 +456,16 @@ class PositionManager:
             "closed_today": len(self.closed_positions),
             "total_pnl": self.total_pnl,
             "consecutive_losses": self.consecutive_losses,
+            "live_trading": self.live_trading,
             "positions": [
                 {
                     "pair": p['pair_name'],
                     "z_score": p['entry_z_score'],
                     "pnl": p.get('current_pnl', 0),
-                    "hold_min": int((time.time() - p['open_time']) / 60)
+                    "hold_min": int((time.time() - p['open_time']) / 60),
+                    "ticket_a": p.get('ticket_a'),
+                    "ticket_b": p.get('ticket_b'),
+                    "is_live": p.get('is_live', False)
                 }
                 for p in self.active_positions
             ]
@@ -385,8 +475,9 @@ class PositionManager:
         """Print formatted status."""
         status = self.get_status()
         
+        trade_mode = "🟢 LIVE" if status['live_trading'] else "📝 PAPER"
         print(f"\n{'='*50}")
-        print(f"📊 POSITION STATUS")
+        print(f"📊 POSITION STATUS ({trade_mode})")
         print(f"{'='*50}")
         print(f"   Active: {status['active_positions']}/{MAX_CONCURRENT_TRADES}")
         print(f"   Closed Today: {status['closed_today']}")
@@ -399,7 +490,10 @@ class PositionManager:
             print(f"\n   OPEN POSITIONS:")
             for p in status['positions']:
                 emoji = '🟢' if p['pnl'] > 0 else '🔴'
-                print(f"   {emoji} {p['pair']}: Z={p['z_score']:.2f} | PnL: {p['pnl']:+.1f} | {p['hold_min']}min")
+                live_tag = " [LIVE]" if p['is_live'] else ""
+                print(f"   {emoji} {p['pair']}: Z={p['z_score']:.2f} | PnL: {p['pnl']:+.1f} | {p['hold_min']}min{live_tag}")
+                if p.get('ticket_a'):
+                    print(f"      Tickets: A=#{p['ticket_a']} B=#{p['ticket_b']}")
         
         print(f"{'='*50}")
     
@@ -407,13 +501,35 @@ class PositionManager:
         """Reset consecutive loss counter (call after successful trade or manual reset)."""
         self.consecutive_losses = 0
         print("✅ Loss counter reset")
+    
+    def sync_with_mt5(self):
+        """
+        Sync local positions with MT5 positions.
+        Useful for recovery after restart.
+        """
+        if not self.executor:
+            print("⚠️ MT5 Executor not available")
+            return
+        
+        print("\n🔄 Syncing with MT5...")
+        mt5_positions = self.executor.get_open_positions()
+        
+        print(f"   Found {len(mt5_positions)} positions in MT5")
+        
+        for pos in mt5_positions:
+            print(f"   - Ticket #{pos['ticket']}: {pos['symbol']} {'BUY' if pos['type']==0 else 'SELL'}")
+            print(f"     Entry: {pos['price_open']:.5f} | Current: {pos['price_current']:.5f}")
+            print(f"     PnL: {pos['profit']:.2f}")
 
 
 # Test
 if __name__ == "__main__":
+    print("Testing Position Manager...")
+    print("=" * 60)
+    
     pm = PositionManager()
     
-    # Test opening
+    # Test with paper trading signal
     test_signal = {
         'pair_name': 'EUR_GBP',
         'pair_a': 'eurusd',
@@ -434,10 +550,16 @@ if __name__ == "__main__":
         'risk_level': 'MEDIUM'
     }
     
+    print("\nOpening test position...")
     pos = pm.open_position(test_signal, test_decision)
+    
+    print("\nPosition Status:")
     pm.print_status()
     
     print("\nTesting can_open_position...")
     can_open, reason = pm.can_open_position('EUR_GBP')
     print(f"Can open EUR_GBP: {can_open} - {reason}")
-
+    
+    if pm.live_trading:
+        print("\n🔄 Syncing with MT5...")
+        pm.sync_with_mt5()

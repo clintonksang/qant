@@ -25,6 +25,9 @@ from config import (
     BUFFER_SIZE,
     MIN_DATA_POINTS,
     LEARNING_TRADES_REQUIRED,
+    LIVE_TRADING,
+    MT5_API_URL,
+    MT5_VOLUME,
     get_session
 )
 from correlation_engine import CorrelationEngine
@@ -82,7 +85,15 @@ last_status_print = 0
 print(f"\n{'='*60}")
 print(f"🎯 ARBITRAGE BOT INITIALIZED")
 print(f"{'='*60}")
-print(f"   Monitoring Pairs:")
+
+# Display trading mode
+trade_mode = "🟢 LIVE TRADING" if LIVE_TRADING else "📝 PAPER TRADING"
+print(f"\n   Mode: {trade_mode}")
+if LIVE_TRADING:
+    print(f"   MT5 API: {MT5_API_URL}")
+    print(f"   Volume: {MT5_VOLUME} lots")
+
+print(f"\n   Monitoring Pairs:")
 for p in POSITIVE_PAIRS:
     print(f"   + {p['name']}: {p['pair_a'].upper()}/{p['pair_b'].upper()} (corr: {p['expected_corr']})")
 for p in NEGATIVE_PAIRS:
@@ -302,9 +313,11 @@ while True:
                 pos_info = ""
                 if position_manager.active_positions:
                     status = position_manager.get_status()
-                    pos_info = f" | Positions: {status['active_positions']} | PnL: {status['total_pnl']:+.1f}"
+                    live_tag = " [LIVE]" if status.get('live_trading') else ""
+                    pos_info = f" | Positions: {status['active_positions']}{live_tag} | PnL: {status['total_pnl']:+.1f}"
                 
-                print(f"\r💱 {ticker.upper()}: {price:.5f}{pos_info}    ", end="", flush=True)
+                mode_icon = "🟢" if LIVE_TRADING else "📝"
+                print(f"\r{mode_icon} {ticker.upper()}: {price:.5f}{pos_info}    ", end="", flush=True)
             else:
                 # During warmup, show progress
                 min_data = min(len(price_buffers[t]) for t in ALL_TICKERS if ticks_received[t] > 0)
