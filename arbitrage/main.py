@@ -45,21 +45,73 @@ if not TIINGO_KEY:
     raise ValueError("TIINGO_KEY not set in environment")
 
 print("🚀 Arbitrage Bot Starting...")
-print(f"📡 Connecting to Tiingo WebSocket...")
 
-# WebSocket connection
-ws = create_connection(
-    "wss://api.tiingo.com/fx",
-    sslopt={"cert_reqs": ssl.CERT_NONE}
-)
+# ============================================================
+# WEBSOCKET CONNECTION MANAGEMENT
+# ============================================================
 
-# Subscribe to all currency pairs
-print(f"📈 Subscribing to {len(ALL_TICKERS)} pairs: {', '.join(ALL_TICKERS)}")
-ws.send(json.dumps({
-    'eventName': 'subscribe',
-    'authorization': TIINGO_KEY,
-    'eventData': {'tickers': ALL_TICKERS}
-}))
+def connect_websocket(max_retries=5, retry_delay=5):
+    """
+    Connect to Tiingo WebSocket with automatic retry.
+    
+    Args:
+        max_retries: Maximum connection attempts
+        retry_delay: Initial delay between retries (seconds)
+        
+    Returns:
+        WebSocket connection object or None if failed
+    """
+    for attempt in range(1, max_retries + 1):
+        try:
+            print(f"📡 Connecting to Tiingo WebSocket... (Attempt {attempt}/{max_retries})")
+            ws = create_connection(
+                "wss://api.tiingo.com/fx",
+                sslopt={"cert_reqs": ssl.CERT_NONE},
+                timeout=10
+            )
+            
+            # Subscribe to all currency pairs
+            print(f"📈 Subscribing to {len(ALL_TICKERS)} pairs: {', '.join(ALL_TICKERS)}")
+            ws.send(json.dumps({
+                'eventName': 'subscribe',
+                'authorization': TIINGO_KEY,
+                'eventData': {'tickers': ALL_TICKERS}
+            }))
+            
+            print(f"✅ WebSocket connected successfully!")
+            return ws
+            
+        except Exception as e:
+            if attempt < max_retries:
+                wait_time = retry_delay * attempt  # Exponential backoff
+                print(f"⚠️ Connection failed: {e}")
+                print(f"   Retrying in {wait_time} seconds...")
+                time.sleep(wait_time)
+            else:
+                print(f"❌ Failed to connect after {max_retries} attempts: {e}")
+                return None
+    
+    return None
+
+def reconnect_websocket(ws, max_retries=5, retry_delay=5):
+    """
+    Reconnect to WebSocket if connection is lost.
+    Preserves existing positions and state.
+    """
+    try:
+        if ws:
+            ws.close()
+    except:
+        pass
+    
+    print(f"\n🔄 Reconnecting WebSocket...")
+    return connect_websocket(max_retries, retry_delay)
+
+# Initial WebSocket connection
+ws = connect_websocket()
+if not ws:
+    print("❌ Cannot start bot without WebSocket connection")
+    exit(1)
 
 # Initialize components
 correlation_engine = CorrelationEngine()
@@ -81,6 +133,7 @@ CORRELATION_CHECK_INTERVAL = 60      # Check correlations every 60 seconds
 REGIME_CHECK_INTERVAL = 900          # Check market regime every 15 minutes
 STATUS_PRINT_INTERVAL = 300          # Print status every 5 minutes
 last_status_print = 0
+last_tick_time = time.time()  # Track last successful tick
 
 print(f"\n{'='*60}")
 print(f"🎯 ARBITRAGE BOT INITIALIZED")
@@ -107,6 +160,15 @@ print(f"\n⏳ Warming up... Need {MIN_DATA_POINTS} data points per pair\n")
 
 while True:
     try:
+        # Check if WebSocket is connected
+        if not ws:
+            print("⚠️ WebSocket not connected, attempting reconnect...")
+            ws = reconnect_websocket(None, max_retries=5, retry_delay=5)
+            if not ws:
+                print("❌ Cannot continue without WebSocket. Waiting 10 seconds...")
+                time.sleep(10)
+                continue
+        
         # Receive WebSocket message
         msg = json.loads(ws.recv())
         
@@ -124,6 +186,7 @@ while True:
             continue
         
         ticks_received[ticker] += 1
+        last_tick_time = time.time()  # Update last successful tick time
         
         # Update candle
         candle = candle_buffers[ticker]
@@ -183,7 +246,6 @@ while True:
         # END OF MINUTE PROCESSING
         # ============================================================
         if timestamp.minute != current_minute:
-            current_time = time.time()
             
             # Store candle close prices
             for t in ALL_TICKERS:
@@ -328,11 +390,51 @@ while True:
         if position_manager.active_positions:
             print(f"⚠️ Closing {len(position_manager.active_positions)} open positions...")
             position_manager.force_close_all(price_buffers, "SHUTDOWN")
+        try:
+            ws.close()
+        except:
+            pass
         print("👋 Goodbye!")
         break
     
+    except (ConnectionError, OSError, BrokenPipeError, ConnectionResetError) as e:
+        # WebSocket connection lost - attempt reconnection
+        print(f"\n⚠️ WebSocket connection lost: {e}")
+        print(f"   Active positions: {len(position_manager.active_positions)}")
+        print(f"   Preserving state and reconnecting...")
+        
+        # Reconnect with exponential backoff
+        ws = reconnect_websocket(ws, max_retries=10, retry_delay=3)
+        
+        if not ws:
+            print("❌ Failed to reconnect. Retrying in 30 seconds...")
+            time.sleep(30)
+            ws = reconnect_websocket(None, max_retries=10, retry_delay=3)
+        
+        if ws:
+            print("✅ Reconnected! Resuming operations...")
+            # Reset warmup if we lost too much data
+            min_data = min(len(price_buffers[t]) for t in ALL_TICKERS if price_buffers[t])
+            if min_data < MIN_DATA_POINTS:
+                warmup_complete = False
+                print(f"⏳ Re-warming up... Need {MIN_DATA_POINTS} data points (have {min_data})")
+        else:
+            print("❌ Critical: Cannot reconnect. Exiting...")
+            break
+    
     except Exception as e:
-        if str(e) not in ["0", ""]:  # Ignore subscription confirmations
+        error_str = str(e)
+        # Ignore subscription confirmations and empty messages
+        if error_str not in ["0", "", "'NoneType' object has no attribute 'recv'"]:
             print(f"\n⚠️ Error: {e}")
+            print(f"   Type: {type(e).__name__}")
+            
+            # Check if WebSocket is still alive
+            try:
+                ws.ping()
+            except:
+                print("   WebSocket appears dead, will reconnect on next iteration...")
+                ws = None
+        
         time.sleep(1)
 
