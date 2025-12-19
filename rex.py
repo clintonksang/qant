@@ -1,14 +1,119 @@
 import simplejson as json
-from websocket import create_connection
-import datetime, os, time, ssl, csv
+from websocket import create_connection, WebSocketConnectionClosedException
+import datetime, os, time, ssl, csv, pickle
 from pathlib import Path
 import brain, execution
 import pattern_learner  # Pattern learning agent
 
 # Initialize
 TIINGO_KEY = os.getenv("TIINGO_KEY")
-ws = create_connection("wss://api.tiingo.com/fx", sslopt={"cert_reqs": ssl.CERT_NONE})
-ws.send(json.dumps({'eventName':'subscribe', 'authorization':TIINGO_KEY, 'eventData':{'tickers':["xauusd"]}}))
+ws = None  # Will be initialized by connect_websocket()
+
+# v7.2: STATE PERSISTENCE - Survive network disconnects
+STATE_FILE = Path(__file__).parent / ".rex_state.pkl"
+STATE_MAX_AGE = 300  # 5 minutes - if state is older, start fresh
+RECONNECT_DELAY = 5  # Seconds to wait between reconnection attempts
+MAX_RECONNECT_ATTEMPTS = 10  # Max attempts before giving up
+
+
+def connect_websocket():
+    """Connect to Tiingo websocket with retry logic."""
+    global ws
+    attempts = 0
+    
+    while attempts < MAX_RECONNECT_ATTEMPTS:
+        try:
+            print(f"\n🔌 Connecting to Tiingo websocket (attempt {attempts + 1}/{MAX_RECONNECT_ATTEMPTS})...")
+            ws = create_connection(
+                "wss://api.tiingo.com/fx", 
+                sslopt={"cert_reqs": ssl.CERT_NONE},
+                timeout=30
+            )
+            ws.send(json.dumps({
+                'eventName': 'subscribe', 
+                'authorization': TIINGO_KEY, 
+                'eventData': {'tickers': ["xauusd"]}
+            }))
+            print("✅ Websocket connected!")
+            return True
+        except Exception as e:
+            attempts += 1
+            print(f"❌ Connection failed: {e}")
+            if attempts < MAX_RECONNECT_ATTEMPTS:
+                print(f"   Retrying in {RECONNECT_DELAY} seconds...")
+                time.sleep(RECONNECT_DELAY)
+    
+    print("💀 Max reconnection attempts reached. Exiting.")
+    return False
+
+
+def save_state():
+    """Save current state to disk for recovery after disconnect."""
+    global closes, candles_history, active_trades, consecutive_losses, last_trade_time
+    global warmup_complete, big_trend, failed_trade_levels, sr_levels, rsi_history
+    
+    state = {
+        'timestamp': time.time(),
+        'closes': closes[-50:] if len(closes) > 50 else closes,  # Keep last 50
+        'candles_history': candles_history[-50:] if len(candles_history) > 50 else candles_history,
+        'active_trades': active_trades,
+        'consecutive_losses': consecutive_losses,
+        'last_trade_time': last_trade_time,
+        'warmup_complete': warmup_complete,
+        'big_trend': big_trend,
+        'failed_trade_levels': failed_trade_levels,
+        'sr_levels': sr_levels,
+        'rsi_history': rsi_history
+    }
+    
+    try:
+        with open(STATE_FILE, 'wb') as f:
+            pickle.dump(state, f)
+    except Exception as e:
+        print(f"⚠️ Failed to save state: {e}")
+
+
+def load_state():
+    """Load state from disk if recent enough."""
+    global closes, candles_history, active_trades, consecutive_losses, last_trade_time
+    global warmup_complete, big_trend, failed_trade_levels, sr_levels, rsi_history
+    
+    if not STATE_FILE.exists():
+        print("📂 No saved state found - starting fresh")
+        return False
+    
+    try:
+        with open(STATE_FILE, 'rb') as f:
+            state = pickle.load(f)
+        
+        # Check if state is too old
+        age = time.time() - state.get('timestamp', 0)
+        if age > STATE_MAX_AGE:
+            print(f"📂 Saved state is {age/60:.1f} minutes old (max {STATE_MAX_AGE/60:.0f}min) - starting fresh")
+            STATE_FILE.unlink()  # Delete old state
+            return False
+        
+        # Restore state
+        closes = state.get('closes', [])
+        candles_history = state.get('candles_history', [])
+        active_trades = state.get('active_trades', [])
+        consecutive_losses = state.get('consecutive_losses', 0)
+        last_trade_time = state.get('last_trade_time', 0)
+        warmup_complete = state.get('warmup_complete', False)
+        big_trend = state.get('big_trend', 'NEUTRAL')
+        failed_trade_levels = state.get('failed_trade_levels', [])
+        sr_levels = state.get('sr_levels', {"support": [], "resistance": []})
+        rsi_history = state.get('rsi_history', [])
+        
+        print(f"✅ RESTORED STATE from {age:.0f}s ago:")
+        print(f"   - {len(closes)} candles, {len(active_trades)} active trades")
+        print(f"   - Warmup: {'COMPLETE' if warmup_complete else f'{len(closes)}/5 candles'}")
+        print(f"   - 1H Trend: {big_trend}")
+        
+        return True
+    except Exception as e:
+        print(f"⚠️ Failed to load state: {e} - starting fresh")
+        return False
 
 # ============================================================
 # FAST SCALPING CONFIG - Tuned for quick trend captures
@@ -20,9 +125,9 @@ ws.send(json.dumps({'eventName':'subscribe', 'authorization':TIINGO_KEY, 'eventD
 # Risk Parameters
 SL_PIPS = 2.00  # Stop Loss in dollars (tighter for scalping)
 TP_PIPS = 2.50  # Take Profit in dollars (1.25:1 R:R - faster exits)
-MAX_TRADES = 2  # Max concurrent trades
-MAX_CONSECUTIVE_LOSSES = 3  # Pause trading after 3 losses (was 4 - more conservative)
-MIN_MINUTES_BETWEEN_TRADES = 4  # Slower re-entry (was 3) - reduces overtrading
+MAX_TRADES = 1  # v6 FIX: Only 1 trade at a time (was 2 - caused duplicates)
+MAX_CONSECUTIVE_LOSSES = 3  # Pause trading after 3 losses
+MIN_MINUTES_BETWEEN_TRADES = 5  # v6: Slower re-entry (was 4) - quality over quantity
 
 # Scalping Enhancements - THE KEY TO FASTER PROFITS
 # v4 FIX: Trailing was too tight, capturing tiny wins while losses stay full
@@ -30,14 +135,39 @@ MIN_MINUTES_BETWEEN_TRADES = 4  # Slower re-entry (was 3) - reduces overtrading
 #   After:  Trigger $1.80, Buffer $0.70 → Lock in at least $0.70 minimum profit
 TRAILING_TRIGGER = 1.80  # When up $1.80, start trailing (gives more room)
 TRAILING_STEP = 0.40     # Trail SL by $0.40 increments (tighter once in profit)
-MAX_HOLD_MINUTES = 12    # Force close if trade sits too long (scalps shouldn't linger)
-BREAKEVEN_BUFFER = 0.70  # Lock in $0.70 minimum when trailing starts (was $0.20)
+MAX_HOLD_MINUTES = 8     # v6 FIX: Force close after 8 min (was 12 - trade #17 stuck 2.5hr)
+BREAKEVEN_BUFFER = 0.70  # Lock in $0.70 minimum when trailing starts
+
+# v6: EXHAUSTION PROTECTION - Don't trade after massive moves
+EXHAUSTION_THRESHOLD = 20.0   # If price moved $20+ in 10min, market is exhausted
+EXHAUSTION_RSI_LOW = 15       # RSI below this = extremely oversold, don't sell
+EXHAUSTION_RSI_HIGH = 85      # RSI above this = extremely overbought, don't buy
+
+# v7.1: RSI DANGER ZONES - ONLY for counter-trend trades (fixed over-filtering)
+# Issue: Original v7 blocked ALL low-RSI sells, even during strong downtrends
+# Fix: Only apply RSI filter when trading AGAINST the structure
+RSI_OVERSOLD_DANGER = 28      # Was 35 - too restrictive (missed $14 drop)
+RSI_OVERBOUGHT_DANGER = 72    # Was 65 - too restrictive
+RSI_RECOVERY_LOOKBACK = 3     # Check if RSI is recovering from extreme
+
+# v7.1: SUPPORT/RESISTANCE DETECTION (relaxed from v7)
+SR_ZONE_SIZE = 2.00           # Was 1.50 - give more room
+SR_TOUCHES_THRESHOLD = 3      # Was 2 - need more confirmation
+SR_ZONE_AVOID_BUFFER = 0.30   # Was 0.50 - less restrictive
+
+# v7.1: FAILED LEVEL TRACKING - Don't repeat mistakes at same price
+FAILED_LEVEL_MEMORY = 3       # Was 5 - shorter memory
+FAILED_LEVEL_COOLDOWN = 10    # Was 15 - shorter cooldown
 
 # Technical Parameters
 RSI_PERIOD = 14
 RSI_OVERBOUGHT = 70
 RSI_OVERSOLD = 30
 SMA_TOUCH_TOLERANCE = 2.50  # Price must be within $2.50 of SMA for pullback entry
+
+# v7.2: WARMUP CONFIG - Reduced from 15 to 5 minutes
+WARMUP_CANDLES = 5  # Only need 5 candles (5 min) to start trading
+# Note: RSI won't be accurate until 15 candles, but we can trade with less data
 
 closes = []
 candles_history = []  # Store full candle data for pattern detection
@@ -51,6 +181,16 @@ consecutive_losses = 0  # Track losing streak
 last_trade_time = 0  # Prevent rapid-fire trades
 warmup_complete = False  # Wait for enough data before trading
 last_hourly_review = 0  # Track when we last did hourly review
+
+# v7: FAILED LEVEL TRACKING - Learn from mistakes
+# Format: [(price, side, timestamp), ...]
+failed_trade_levels = []
+
+# v7: SUPPORT/RESISTANCE TRACKING
+# Format: {"support": [price1, price2, ...], "resistance": [price1, price2, ...]}
+sr_levels = {"support": [], "resistance": []}
+price_bounces = []  # Track price bounces for S/R detection
+rsi_history = []  # Track RSI for recovery detection
 
 # ===== MOMENTUM PROTECTION (NEW) =====
 # Prevents selling into rallies / buying into dumps
@@ -143,6 +283,243 @@ def check_momentum_override(side, closes_list):
     
     return False, f"Momentum OK (${recent_change:+.2f} in {MOMENTUM_LOOKBACK}min)"
 
+
+def check_rsi_danger_zone(side, rsi, closes_list, structure=""):
+    """
+    v7.1: SMART RSI protection - only blocks COUNTER-TREND trades.
+    
+    KEY FIX: v7 was too aggressive - blocked ALL low-RSI sells even during downtrends.
+    The $14 drop (01:00-01:30) was missed because RSI was 16-37 but structure was DOWNTREND.
+    
+    NEW RULE: If trading WITH the trend structure, allow even at extreme RSI.
+    Only block RSI extremes for counter-trend or consolidation trades.
+    
+    Returns (should_block, reason)
+    """
+    # Track RSI history for recovery detection
+    global rsi_history
+    rsi_history.append(rsi)
+    if len(rsi_history) > 10:
+        rsi_history = rsi_history[-10:]
+    
+    # v7.1: CHECK IF TRADING WITH TREND - if so, skip RSI restrictions
+    is_downtrend = "LOWER_HIGHS_LOWS" in structure
+    is_uptrend = "HIGHER_HIGHS_LOWS" in structure
+    is_consolidating = "CONSOLIDATING" in structure or "EXPANDING" in structure or "Building" in structure
+    
+    if side == "SELL":
+        # ✅ ALLOW: SELL during downtrend - trading WITH the trend
+        if is_downtrend:
+            return False, f"✅ RSI {rsi:.0f} OK - SELL with DOWNTREND structure"
+        
+        # ❌ BLOCK: SELL during uptrend with low RSI - COUNTER-TREND danger
+        if is_uptrend and rsi < RSI_OVERSOLD_DANGER:
+            return True, f"🛑 RSI {rsi:.0f} + UPTREND: Don't SELL oversold during uptrend (bounce likely)"
+        
+        # ⚠️ CAUTION: SELL during consolidation with low RSI
+        if is_consolidating and rsi < RSI_OVERSOLD_DANGER:
+            # Check if RSI is recovering (bouncing)
+            if len(rsi_history) >= RSI_RECOVERY_LOOKBACK:
+                recent_rsi = rsi_history[-RSI_RECOVERY_LOOKBACK:]
+                min_recent = min(recent_rsi)
+                if min_recent < 25 and rsi > min_recent + 3:  # RSI bouncing from extreme
+                    return True, f"🛑 RSI RECOVERING in consolidation: {min_recent:.0f} → {rsi:.0f} - wait for direction"
+            
+            # Check if price is bouncing
+            if len(closes_list) >= 3:
+                recent_change = closes_list[-1] - closes_list[-3]
+                if recent_change > 0.80:  # Strong bounce
+                    return True, f"🛑 RSI {rsi:.0f} + BOUNCE ${recent_change:.2f} in consolidation - DON'T SELL"
+    
+    if side == "BUY":
+        # ✅ ALLOW: BUY during uptrend - trading WITH the trend
+        if is_uptrend:
+            return False, f"✅ RSI {rsi:.0f} OK - BUY with UPTREND structure"
+        
+        # ❌ BLOCK: BUY during downtrend with high RSI - COUNTER-TREND danger
+        if is_downtrend and rsi > RSI_OVERBOUGHT_DANGER:
+            return True, f"🛑 RSI {rsi:.0f} + DOWNTREND: Don't BUY overbought during downtrend (pullback likely)"
+        
+        # ⚠️ CAUTION: BUY during consolidation with high RSI
+        if is_consolidating and rsi > RSI_OVERBOUGHT_DANGER:
+            # Check if RSI is falling
+            if len(rsi_history) >= RSI_RECOVERY_LOOKBACK:
+                recent_rsi = rsi_history[-RSI_RECOVERY_LOOKBACK:]
+                max_recent = max(recent_rsi)
+                if max_recent > 75 and rsi < max_recent - 3:  # RSI falling from extreme
+                    return True, f"🛑 RSI FALLING in consolidation: {max_recent:.0f} → {rsi:.0f} - wait for direction"
+            
+            # Check if price is dropping
+            if len(closes_list) >= 3:
+                recent_change = closes_list[-1] - closes_list[-3]
+                if recent_change < -0.80:  # Strong drop
+                    return True, f"🛑 RSI {rsi:.0f} + DROP ${abs(recent_change):.2f} in consolidation - DON'T BUY"
+    
+    return False, f"RSI {rsi:.0f} OK for {side}"
+
+
+def detect_support_resistance(closes_list, highs, lows):
+    """
+    v7: Detect support and resistance levels from recent price action.
+    
+    KEY FINDING: User shorted 3x at 4327-4329 (support zone) and all failed.
+    Market was clearly defending this level.
+    """
+    global sr_levels, price_bounces
+    
+    if len(closes_list) < 20:
+        return sr_levels
+    
+    # Detect bounces (price reversals)
+    recent_closes = closes_list[-20:]
+    
+    for i in range(2, len(recent_closes) - 1):
+        prev_move = recent_closes[i-1] - recent_closes[i-2]
+        curr_move = recent_closes[i] - recent_closes[i-1]
+        next_move = recent_closes[i+1] - recent_closes[i] if i+1 < len(recent_closes) else 0
+        
+        # Detect bottom (support touch): price was falling, then bounced up
+        if prev_move < -0.30 and curr_move > 0.30:
+            bounce_price = recent_closes[i-1]  # The low point
+            price_bounces.append(("support", bounce_price, time.time()))
+        
+        # Detect top (resistance touch): price was rising, then reversed down
+        if prev_move > 0.30 and curr_move < -0.30:
+            bounce_price = recent_closes[i-1]  # The high point
+            price_bounces.append(("resistance", bounce_price, time.time()))
+    
+    # Clean old bounces (older than 30 min)
+    current_time = time.time()
+    price_bounces[:] = [(t, p, ts) for t, p, ts in price_bounces if current_time - ts < 1800]
+    
+    # Group bounces into zones and count touches
+    support_zones = {}
+    resistance_zones = {}
+    
+    for bounce_type, price, ts in price_bounces:
+        # Round to nearest SR_ZONE_SIZE
+        zone_price = round(price / SR_ZONE_SIZE) * SR_ZONE_SIZE
+        
+        if bounce_type == "support":
+            support_zones[zone_price] = support_zones.get(zone_price, 0) + 1
+        else:
+            resistance_zones[zone_price] = resistance_zones.get(zone_price, 0) + 1
+    
+    # Identify established S/R levels (2+ touches)
+    sr_levels["support"] = [p for p, count in support_zones.items() if count >= SR_TOUCHES_THRESHOLD]
+    sr_levels["resistance"] = [p for p, count in resistance_zones.items() if count >= SR_TOUCHES_THRESHOLD]
+    
+    return sr_levels
+
+
+def check_sr_zone_conflict(side, price, sr_levels):
+    """
+    v7: Don't trade at established support/resistance zones.
+    
+    KEY FINDING: 3 SELL trades at 4327-4329 all failed because it was support.
+    """
+    # Don't SELL near support (price will bounce up)
+    if side == "SELL":
+        for support in sr_levels.get("support", []):
+            if abs(price - support) < SR_ZONE_AVOID_BUFFER + SR_ZONE_SIZE:
+                return True, f"🛑 SUPPORT ZONE: ${support:.2f} - DON'T SELL near support (3 trades failed here)"
+    
+    # Don't BUY near resistance (price will reverse down)
+    if side == "BUY":
+        for resistance in sr_levels.get("resistance", []):
+            if abs(price - resistance) < SR_ZONE_AVOID_BUFFER + SR_ZONE_SIZE:
+                return True, f"🛑 RESISTANCE ZONE: ${resistance:.2f} - DON'T BUY near resistance"
+    
+    return False, "Not at S/R zone"
+
+
+def track_failed_level(side, price, pnl):
+    """
+    v7: Track price levels where trades failed.
+    
+    KEY FINDING: User made the same mistake 3 times at 4327-4329.
+    This function remembers failed levels to avoid repeating mistakes.
+    """
+    global failed_trade_levels
+    
+    if pnl < 0:  # Trade was a loss
+        failed_trade_levels.append((price, side, time.time()))
+        
+        # Keep only last N failed levels
+        if len(failed_trade_levels) > FAILED_LEVEL_MEMORY:
+            failed_trade_levels = failed_trade_levels[-FAILED_LEVEL_MEMORY:]
+
+
+def check_failed_level(side, price):
+    """
+    v7: Check if we're trying to trade at a recently failed level.
+    
+    Returns (should_block, reason)
+    """
+    global failed_trade_levels
+    
+    current_time = time.time()
+    
+    # Clean expired entries
+    failed_trade_levels[:] = [
+        (p, s, ts) for p, s, ts in failed_trade_levels 
+        if current_time - ts < FAILED_LEVEL_COOLDOWN * 60
+    ]
+    
+    # Check if current price is near a failed level
+    for failed_price, failed_side, timestamp in failed_trade_levels:
+        if abs(price - failed_price) < SR_ZONE_SIZE:
+            if failed_side == side:
+                mins_ago = int((current_time - timestamp) / 60)
+                cooldown_left = FAILED_LEVEL_COOLDOWN - mins_ago
+                return True, f"🛑 FAILED LEVEL: {side} lost at ${failed_price:.2f} ({mins_ago}min ago) - AVOID for {cooldown_left}min"
+    
+    return False, "No recent failures at this level"
+
+
+def check_accelerating_trend_conflict(side, trend_analysis):
+    """
+    v7.1: ONLY block clear counter-trend trades against strong momentum.
+    
+    KEY FIX: v7 was too aggressive - blocked sells during ACCEL_UP even in downtrend structure.
+    Now we check structure first - if trading WITH structure, allow regardless of momentum.
+    """
+    momentum = trend_analysis.get('momentum', 'STABLE')
+    medium_trend = trend_analysis.get('medium_trend', 'NEUTRAL')
+    structure = trend_analysis.get('structure', '')
+    
+    is_downtrend = "LOWER_HIGHS_LOWS" in structure
+    is_uptrend = "HIGHER_HIGHS_LOWS" in structure
+    
+    if side == "SELL":
+        # ✅ ALLOW: SELL during downtrend structure (even if short-term momentum is up)
+        if is_downtrend:
+            return False, f"✅ SELL OK - DOWNTREND structure overrides momentum"
+        
+        # ❌ BLOCK: SELL during uptrend + ACCELERATING_UP (strong counter-trend)
+        if is_uptrend and momentum == "ACCELERATING_UP":
+            return True, f"🛑 UPTREND + ACCEL_UP: Strong rally - DON'T SELL"
+        
+        # ⚠️ CAUTION: SELL during ACCELERATING_UP in consolidation
+        if momentum == "ACCELERATING_UP" and medium_trend == "BULLISH":
+            return True, f"🛑 ACCEL_UP + BULLISH 15m: Momentum building - DON'T SELL into rally"
+    
+    if side == "BUY":
+        # ✅ ALLOW: BUY during uptrend structure (even if short-term momentum is down)
+        if is_uptrend:
+            return False, f"✅ BUY OK - UPTREND structure overrides momentum"
+        
+        # ❌ BLOCK: BUY during downtrend + ACCELERATING_DOWN (strong counter-trend)
+        if is_downtrend and momentum == "ACCELERATING_DOWN":
+            return True, f"🛑 DOWNTREND + ACCEL_DOWN: Strong dump - DON'T BUY"
+        
+        # ⚠️ CAUTION: BUY during ACCELERATING_DOWN in consolidation
+        if momentum == "ACCELERATING_DOWN" and medium_trend == "BEARISH":
+            return True, f"🛑 ACCEL_DOWN + BEARISH 15m: Momentum building - DON'T BUY into dump"
+    
+    return False, f"Momentum {momentum} OK for {side}"
+
+
 def check_short_term_trend_conflict(side, trend_analysis, big_trend="NEUTRAL", price=0, sma=0, rsi=50):
     """
     v5: Enhanced trend conflict check with 1m and 3m ultra-short trends.
@@ -211,6 +588,18 @@ def check_short_term_trend_conflict(side, trend_analysis, big_trend="NEUTRAL", p
     if "CONSOLIDATING" in structure or "Range" in structure:
         if momentum == "STABLE":
             return True, f"🚫 CHOPPY: Consolidating with STABLE momentum - wait for breakout"
+        # v6: Even with momentum, be careful in consolidation
+        strength = trend_analysis.get('strength', 50)
+        if strength < 40:
+            return True, f"🚫 WEAK: Consolidating with only {strength}% strength"
+    
+    # v6: MIXED SIGNALS - Avoid when timeframes conflict
+    bullish_count = sum(1 for t in [trend_1m, trend_3m, short_trend, medium_trend] if t == "BULLISH")
+    bearish_count = sum(1 for t in [trend_1m, trend_3m, short_trend, medium_trend] if t == "BEARISH")
+    
+    # If signals are mixed (e.g., 2 bullish, 2 bearish), skip
+    if bullish_count >= 2 and bearish_count >= 2:
+        return True, f"🚫 MIXED SIGNALS: {bullish_count} bullish vs {bearish_count} bearish timeframes - no clear direction"
     
     return False, "No trend conflict"
 
@@ -368,9 +757,9 @@ def check_filters(side, price, sma, rsi, timestamp):
     """Check all entry filters. Returns (can_trade, reason)."""
     global consecutive_losses, last_trade_time, warmup_complete, active_trades
     
-    # 0. Warmup check - need enough data
+    # 0. Warmup check - need enough data (v7.2: reduced to 5 min)
     if not warmup_complete:
-        return False, f"Warming up (need {RSI_PERIOD + 1} candles)"
+        return False, f"Warming up (need {WARMUP_CANDLES} candles)"
     
     # 1. Losing streak check
     if consecutive_losses >= MAX_CONSECUTIVE_LOSSES:
@@ -387,8 +776,29 @@ def check_filters(side, price, sma, rsi, timestamp):
         if t['side'] != side:
             return False, f"Conflicting {t['side']} position open"
     
-    # RSI and Pullback filters REMOVED - we follow trends only!
-    # The AI brain decides based on 1H trend, not RSI
+    # v6: EXHAUSTION FILTER - Don't trade at extremes after big moves
+    if len(closes) >= 10:
+        price_change_10m = closes[-1] - closes[-10]
+        
+        # Don't SELL after massive crash (market due for bounce)
+        if side == "SELL" and price_change_10m < -EXHAUSTION_THRESHOLD:
+            return False, f"🛑 EXHAUSTED: -${abs(price_change_10m):.0f} in 10min, bounce likely"
+        
+        # Don't BUY after massive rally (market due for pullback)
+        if side == "BUY" and price_change_10m > EXHAUSTION_THRESHOLD:
+            return False, f"🛑 EXHAUSTED: +${price_change_10m:.0f} in 10min, pullback likely"
+    
+    # v6: EXTREME RSI FILTER - Don't fight extreme readings
+    if side == "SELL" and rsi < EXHAUSTION_RSI_LOW:
+        return False, f"🛑 RSI {rsi:.0f} extremely oversold, don't SELL"
+    if side == "BUY" and rsi > EXHAUSTION_RSI_HIGH:
+        return False, f"🛑 RSI {rsi:.0f} extremely overbought, don't BUY"
+    
+    # v6: FINAL HOUR FILTER - Reduce trading frequency 17:00-18:00 UTC
+    if timestamp.hour == 17:
+        # During final hour, require stronger cooldown
+        if (current_time - last_trade_time) < (8 * 60):  # 8 min cooldown instead of 5
+            return False, f"⏰ Final hour: extended cooldown"
     
     return True, "All filters passed"
 
@@ -498,6 +908,10 @@ def open_trade(side, entry_price, timestamp, trend_analysis, rsi, sma, detected_
     print(f"   Session: {session} | Entry: {price_action_type}")
     print(f"   Context: 1H {big_trend} | RSI {rsi:.0f} | SMA {sma_position}")
     print(f"{'='*60}")
+    
+    # v7.2: Save state after trade opens (for recovery)
+    save_state()
+    
     return new_trade
 
 def check_trade_exit(current_price):
@@ -574,6 +988,8 @@ def check_trade_exit(current_price):
             # Track consecutive losses
             if pnl < 0:
                 consecutive_losses += 1
+                # v7: Track failed price level to avoid repeating mistakes
+                track_failed_level(side, entry, pnl)
             else:
                 consecutive_losses = 0  # Reset on win
             
@@ -654,14 +1070,35 @@ def check_trade_exit(current_price):
     # Remove closed trades
     for trade in trades_to_close:
         active_trades.remove(trade)
+    
+    # v7.2: Save state after trade closes (important for recovery)
+    if trades_to_close:
+        save_state()
 
 init_csv()
 init_price_log()  # Initialize price movement logging
-print("🚀 Rex v5 (Ultra-Short Trends) is Live...")
-print(f"   🔬 NEW: 1m & 3m trend analysis for precise entry timing")
-print(f"   📊 R:R Fix: Trail at +${TRAILING_TRIGGER}, lock in ${BREAKEVEN_BUFFER} minimum")
-print(f"   ⚡ Momentum protection: Block counter-trend when price moves ${MOMENTUM_THRESHOLD}+ in {MOMENTUM_LOOKBACK}min")
-print(f"   🚫 Counter-trend: Requires 15m+5m+3m alignment + RSI confirmation")
+print("🚀 Rex v7.2 (Auto-Reconnect + Fast Warmup) is Live...")
+print(f"   🎯 v7.2 FEATURES:")
+print(f"      - AUTO-RECONNECT: Survives network disconnects")
+print(f"      - STATE PERSISTENCE: Resumes with existing data (up to {STATE_MAX_AGE/60:.0f}min old)")
+print(f"      - FAST WARMUP: Only {WARMUP_CANDLES} min needed (was 15)")
+print(f"   📊 Trend-Aware Filters (v7.1):")
+print(f"      - RSI {RSI_OVERSOLD_DANGER}/{RSI_OVERBOUGHT_DANGER} only blocks counter-trend")
+print(f"      - TRADE WITH TREND: allowed at any RSI")
+print(f"   ⚙️ Core Settings:")
+print(f"      - MAX_TRADES: 1 | MAX_HOLD: {MAX_HOLD_MINUTES}min | COOLDOWN: {MIN_MINUTES_BETWEEN_TRADES}min")
+print(f"      - Trailing: +${TRAILING_TRIGGER} trigger, lock ${BREAKEVEN_BUFFER} minimum")
+
+# v7.2: Load saved state if available (for recovery after disconnect)
+state_loaded = load_state()
+
+# v7.2: Connect to websocket with retry logic
+if not connect_websocket():
+    print("❌ Failed to connect. Exiting.")
+    exit(1)
+
+last_state_save = time.time()
+STATE_SAVE_INTERVAL = 30  # Save state every 30 seconds
 
 while True:
     try:
@@ -711,10 +1148,11 @@ while True:
             if detected_patterns:
                 print(f"📍 Patterns detected: {', '.join(detected_patterns)}")
             
-            # Check warmup status
-            if len(closes) >= RSI_PERIOD + 1 and not warmup_complete:
+            # Check warmup status (v7.2: reduced to 5 min)
+            if len(closes) >= WARMUP_CANDLES and not warmup_complete:
                 warmup_complete = True
-                print(f"\n✅ WARMUP COMPLETE - {len(closes)} candles collected, RSI active")
+                rsi_status = "RSI active" if len(closes) >= RSI_PERIOD + 1 else f"RSI needs {RSI_PERIOD + 1 - len(closes)} more"
+                print(f"\n✅ WARMUP COMPLETE - {len(closes)} candles collected, {rsi_status}")
             
             # Fetch AI Context (RAG)
             history = execution.get_memory(f"Gold price at {price} in {big_trend} trend")
@@ -722,7 +1160,7 @@ while True:
             # AI Decision (with full trend context)
             trade = brain.get_decision(candle, history, big_trend, sma8, rsi, trend_analysis)
             sma_pos = "ABOVE" if candle['close'] > sma8 else "BELOW"
-            warmup_status = "" if warmup_complete else f" | ⏳ Warmup {len(closes)}/{RSI_PERIOD + 1}"
+            warmup_status = "" if warmup_complete else f" | ⏳ Warmup {len(closes)}/{WARMUP_CANDLES}"
             
             # Enhanced logging with trend info
             confidence = trade.get('confidence', 5)
@@ -731,6 +1169,22 @@ while True:
             # v5: Show all timeframes including 1m and 3m
             print(f"📈 1H: {big_trend} | 15m: {trend_analysis['medium_trend']} | 5m: {trend_analysis['short_trend']} | 3m: {trend_analysis.get('trend_3m', 'N/A')} | 1m: {trend_analysis.get('trend_1m', 'N/A')}")
             print(f"💨 Momentum: {trend_analysis['momentum']} | 1m: ${trend_analysis.get('change_1m', 0):+.2f} | 3m: ${trend_analysis.get('change_3m', 0):+.2f}")
+            
+            # v7: Show RSI zone status
+            rsi_zone = "🟢 SAFE" if RSI_OVERSOLD_DANGER <= rsi <= RSI_OVERBOUGHT_DANGER else "🔴 DANGER"
+            print(f"📉 RSI Zone: {rsi_zone} | Structure: {trend_analysis['structure'][:20]}")
+            
+            # v7: Show S/R levels if any
+            if sr_levels.get("support") or sr_levels.get("resistance"):
+                sup_str = f"S:{sr_levels['support']}" if sr_levels.get("support") else ""
+                res_str = f"R:{sr_levels['resistance']}" if sr_levels.get("resistance") else ""
+                print(f"📍 S/R: {sup_str} {res_str}")
+            
+            # v7: Show failed levels if any
+            if failed_trade_levels:
+                recent_fails = [f"${p:.0f}({s})" for p, s, _ in failed_trade_levels[-3:]]
+                print(f"⚠️ Failed Levels: {', '.join(recent_fails)}")
+            
             print(f"🤖 AI: {trade['decision']} (Confidence: {confidence}/10){warmup_status}")
             
             # Log price movement for learning
@@ -747,7 +1201,49 @@ while True:
                 can_trade, filter_reason = check_filters(trade['decision'], candle['close'], sma8, rsi, timestamp)
                 
                 if can_trade:
-                    # ===== MOMENTUM PROTECTION (NEW) =====
+                    # ===== v7.1: RSI DANGER ZONE CHECK (NOW TREND-AWARE) =====
+                    # v7.1 FIX: Now allows trading WITH trend even at extreme RSI
+                    structure = trend_analysis.get('structure', '')
+                    rsi_blocked, rsi_reason = check_rsi_danger_zone(trade['decision'], rsi, closes, structure)
+                    if rsi_blocked:
+                        print(f"\n{rsi_reason}")
+                        can_trade = False
+                        filter_reason = rsi_reason
+                    
+                    # ===== v7: ACCELERATING TREND CHECK =====
+                    # Don't fight accelerating momentum
+                    if can_trade:
+                        accel_blocked, accel_reason = check_accelerating_trend_conflict(trade['decision'], trend_analysis)
+                        if accel_blocked:
+                            print(f"\n{accel_reason}")
+                            can_trade = False
+                            filter_reason = accel_reason
+                    
+                    # ===== v7: SUPPORT/RESISTANCE ZONE CHECK =====
+                    # Based on backtest: 3 sells at 4327-4329 (support) all failed
+                    if can_trade:
+                        # Update S/R levels
+                        highs = [c.get('high', c.get('close', 0)) for c in candles_history[-20:]] if len(candles_history) >= 20 else []
+                        lows = [c.get('low', c.get('close', 0)) for c in candles_history[-20:]] if len(candles_history) >= 20 else []
+                        detect_support_resistance(closes, highs, lows)
+                        
+                        sr_blocked, sr_reason = check_sr_zone_conflict(trade['decision'], candle['close'], sr_levels)
+                        if sr_blocked:
+                            print(f"\n{sr_reason}")
+                            can_trade = False
+                            filter_reason = sr_reason
+                    
+                    # ===== v7: FAILED LEVEL CHECK =====
+                    # Don't repeat the same mistake at the same price
+                    if can_trade:
+                        failed_blocked, failed_reason = check_failed_level(trade['decision'], candle['close'])
+                        if failed_blocked:
+                            print(f"\n{failed_reason}")
+                            can_trade = False
+                            filter_reason = failed_reason
+                    
+                    # ===== MOMENTUM PROTECTION =====
+                    if can_trade:
                     momentum_blocked, momentum_reason = check_momentum_override(trade['decision'], closes)
                     if momentum_blocked:
                         print(f"\n{momentum_reason}")
@@ -853,7 +1349,34 @@ while True:
                 trade_info = f" | {len(active_trades)} trades PnL: {total_pnl:+.2f}"
             print(f"\r💰 {price:.2f} | H: {candle['high']:.2f} L: {candle['low']:.2f}{trade_info}    ", end="", flush=True)
 
+        # v7.2: Periodically save state (inside try block for successful ticks)
+        if time.time() - last_state_save > STATE_SAVE_INTERVAL:
+            save_state()
+            last_state_save = time.time()
+
+    except WebSocketConnectionClosedException as e:
+        print(f"\n🔌 Websocket disconnected: {e}")
+        save_state()  # Save state before reconnecting
+        print("💾 State saved. Attempting to reconnect...")
+        if not connect_websocket():
+            print("❌ Failed to reconnect. Exiting.")
+            break
+        print("✅ Reconnected! Resuming with saved state...")
+
     except Exception as e:
-        if str(e) != "0":  # Ignore subscription confirmation
+        error_str = str(e)
+        if error_str == "0":  # Ignore subscription confirmation
+            continue
+        
+        # Check if it's a connection-related error
+        if any(x in error_str.lower() for x in ['connection', 'socket', 'timeout', 'broken pipe', 'reset']):
+            print(f"\n🔌 Network error: {e}")
+            save_state()
+            print("💾 State saved. Attempting to reconnect...")
+            if not connect_websocket():
+                print("❌ Failed to reconnect. Exiting.")
+                break
+            print("✅ Reconnected! Resuming with saved state...")
+        else:
             print(f"\nLoop Error: {e}")
-        time.sleep(1)
+            time.sleep(1)

@@ -3,6 +3,35 @@ Arbitrage System Configuration
 Defines currency pair correlations and trading parameters
 """
 
+import os
+
+# ============================================================
+# LIVE TRADING MODE
+# ============================================================
+# Set to True to execute real trades via MT5 API
+# Set to False for paper trading (simulation only)
+LIVE_TRADING = os.getenv("LIVE_TRADING", "false").lower() == "true"
+
+# MT5 API Configuration
+MT5_API_URL = os.getenv("MT5_API_URL", "https://api.ruthwestlimited.com")
+MT5_VOLUME = float(os.getenv("MT5_VOLUME", "0.01"))  # Lot size (0.01 = micro lot)
+MT5_MAGIC = int(os.getenv("MT5_MAGIC", "123456"))    # Magic number for bot identification
+
+# Symbol Mapping: Internal name -> MT5 symbol
+MT5_SYMBOL_MAP = {
+    "eurusd": "EURUSDm",
+    "gbpusd": "GBPUSDm",
+    "audusd": "AUDUSDm",
+    "nzdusd": "NZDUSDm",
+    "usdchf": "USDCHFm",
+    "usdcad": "USDCADm",
+    "eurjpy": "EURJPYm",
+    "gbpjpy": "GBPJPYm",
+    "eurgbp": "EURGBPm",
+    "audcad": "AUDCADm",
+    "nzdcad": "NZDCADm",
+}
+
 # ============================================================
 # CURRENCY PAIR CORRELATIONS (2025 Data)
 # ============================================================
