@@ -126,7 +126,7 @@ candle_buffers = {ticker: {"high": 0, "low": 99999, "close": 0, "open": 0} for t
 current_minute = None
 last_correlation_check = 0
 last_regime_check = 0
-warmup_complete = False
+warmup_complete = True  # v6: Removed warmup - start trading immediately
 ticks_received = {ticker: 0 for ticker in ALL_TICKERS}
 
 CORRELATION_CHECK_INTERVAL = 60      # Check correlations every 60 seconds
@@ -152,7 +152,7 @@ for p in POSITIVE_PAIRS:
 for p in NEGATIVE_PAIRS:
     print(f"   - {p['name']}: {p['pair_a'].upper()}/{p['pair_b'].upper()} (corr: {p['expected_corr']})")
 print(f"{'='*60}")
-print(f"\n⏳ Warming up... Need {MIN_DATA_POINTS} data points per pair\n")
+print(f"\n🎯 Arbitrage detection ACTIVE\n")
 
 # ============================================================
 # MAIN LOOP
@@ -247,6 +247,9 @@ while True:
         # ============================================================
         if timestamp.minute != current_minute:
             
+            # Get current time for interval checks
+            current_time = time.time()
+            
             # Store candle close prices
             for t in ALL_TICKERS:
                 if candle_buffers[t]['close'] > 0:
@@ -255,17 +258,10 @@ while True:
                     if len(price_buffers[t]) > BUFFER_SIZE:
                         price_buffers[t].pop(0)
             
-            # Check warmup status
-            min_data = min(len(price_buffers[t]) for t in ALL_TICKERS)
-            if not warmup_complete and min_data >= MIN_DATA_POINTS:
-                warmup_complete = True
-                print(f"\n✅ WARMUP COMPLETE - All pairs have {min_data}+ data points")
-                print(f"🎯 Arbitrage detection ACTIVE\n")
-            
             # ============================================================
-            # CORRELATION & SIGNAL DETECTION (Every minute after warmup)
+            # CORRELATION & SIGNAL DETECTION (Every minute)
             # ============================================================
-            if warmup_complete and (current_time - last_correlation_check) > CORRELATION_CHECK_INTERVAL:
+            if (current_time - last_correlation_check) > CORRELATION_CHECK_INTERVAL:
                 last_correlation_check = current_time
                 
                 # Calculate correlations
@@ -314,7 +310,7 @@ while True:
             # ============================================================
             # MARKET REGIME CHECK (Every 15 minutes)
             # ============================================================
-            if warmup_complete and (current_time - last_regime_check) > REGIME_CHECK_INTERVAL:
+            if (current_time - last_regime_check) > REGIME_CHECK_INTERVAL:
                 last_regime_check = current_time
                 
                 correlations = correlation_engine.calculate_all(price_buffers)
@@ -329,7 +325,7 @@ while True:
             # ============================================================
             # PERIODIC STATUS PRINT
             # ============================================================
-            if warmup_complete and (current_time - last_status_print) > STATUS_PRINT_INTERVAL:
+            if (current_time - last_status_print) > STATUS_PRINT_INTERVAL:
                 last_status_print = current_time
                 
                 session = get_session(timestamp.hour)
@@ -371,19 +367,14 @@ while True:
         # ============================================================
         else:
             # Show live prices
-            if warmup_complete:
-                pos_info = ""
-                if position_manager.active_positions:
-                    status = position_manager.get_status()
-                    live_tag = " [LIVE]" if status.get('live_trading') else ""
-                    pos_info = f" | Positions: {status['active_positions']}{live_tag} | PnL: {status['total_pnl']:+.1f}"
-                
-                mode_icon = "🟢" if LIVE_TRADING else "📝"
-                print(f"\r{mode_icon} {ticker.upper()}: {price:.5f}{pos_info}    ", end="", flush=True)
-            else:
-                # During warmup, show progress
-                min_data = min(len(price_buffers[t]) for t in ALL_TICKERS if ticks_received[t] > 0)
-                print(f"\r⏳ Warming up: {min_data}/{MIN_DATA_POINTS} points | {ticker.upper()}: {price:.5f}    ", end="", flush=True)
+            pos_info = ""
+            if position_manager.active_positions:
+                status = position_manager.get_status()
+                live_tag = " [LIVE]" if status.get('live_trading') else ""
+                pos_info = f" | Positions: {status['active_positions']}{live_tag} | PnL: {status['total_pnl']:+.1f}"
+            
+            mode_icon = "🟢" if LIVE_TRADING else "📝"
+            print(f"\r{mode_icon} {ticker.upper()}: {price:.5f}{pos_info}    ", end="", flush=True)
     
     except KeyboardInterrupt:
         print("\n\n🛑 Shutting down...")
@@ -413,11 +404,6 @@ while True:
         
         if ws:
             print("✅ Reconnected! Resuming operations...")
-            # Reset warmup if we lost too much data
-            min_data = min(len(price_buffers[t]) for t in ALL_TICKERS if price_buffers[t])
-            if min_data < MIN_DATA_POINTS:
-                warmup_complete = False
-                print(f"⏳ Re-warming up... Need {MIN_DATA_POINTS} data points (have {min_data})")
         else:
             print("❌ Critical: Cannot reconnect. Exiting...")
             break
