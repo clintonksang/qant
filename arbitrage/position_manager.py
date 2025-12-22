@@ -19,7 +19,10 @@ from config import (
     PAIR_MAX_HOLD,
     LIVE_TRADING,
     MT5_VOLUME,
-    MT5_MAGIC
+    MT5_MAGIC,
+    MIN_PROFIT_PIPS,      # v3: New profit threshold
+    MAX_LOSS_PIPS,        # v4: Maximum loss before exit
+    LOSS_EXIT_MINUTES,    # v4: Exit losers after this time
 )
 
 
@@ -278,19 +281,35 @@ class PositionManager:
             
             # Check exit conditions
             exit_reason = None
-            
-            # 1. Mean reversion - take profit
-            if abs(z_score) < Z_SCORE_EXIT_THRESHOLD:
-                exit_reason = "MEAN_REVERSION"
-            
-            # 2. Time-based exit (v2: per-pair limits)
+            total_pnl = pnl_a + pnl_b
             hold_minutes = (time.time() - position['open_time']) / 60
             pair_name = position['pair_name']
             max_hold = PAIR_MAX_HOLD.get(pair_name, MAX_HOLD_MINUTES)
-            if hold_minutes >= max_hold:
-                exit_reason = "TIME_EXIT"
             
-            # 3. Stop loss - Z-score went further against us
+            # 1. Mean reversion - take profit (spread normalized)
+            if abs(z_score) < Z_SCORE_EXIT_THRESHOLD:
+                exit_reason = "MEAN_REVERSION"
+            
+            # 2. v3: PROFIT TARGET - Exit if we hit minimum profit threshold
+            elif total_pnl >= MIN_PROFIT_PIPS:
+                exit_reason = "PROFIT_TARGET"
+            
+            # 3. v4: MAX LOSS PROTECTION - Cut losses early! (prevents -6.6 disasters)
+            elif total_pnl <= MAX_LOSS_PIPS:
+                exit_reason = "MAX_LOSS"
+            
+            # 4. v4: TIMED LOSS EXIT - After LOSS_EXIT_MINUTES, exit any loser
+            elif hold_minutes >= LOSS_EXIT_MINUTES and total_pnl < 0:
+                exit_reason = "TIMED_LOSS"
+            
+            # 5. Time-based exit - strict max hold (no more 1.5x buffer!)
+            elif hold_minutes >= max_hold:
+                if total_pnl > 0:
+                    exit_reason = "TIME_EXIT_PROFIT"
+                else:
+                    exit_reason = "TIME_EXIT"  # v4: Exit immediately at max hold
+            
+            # 6. Stop loss - Z-score went further against us
             entry_z = position['entry_z_score']
             if entry_z > 0 and z_score > STOP_LOSS_ZSCORE:
                 exit_reason = "STOP_LOSS"
@@ -324,6 +343,9 @@ class PositionManager:
         # ============================================================
         # CLOSE LIVE TRADES VIA MT5
         # ============================================================
+        actual_exit_a = exit_a  # Default to WebSocket price
+        actual_exit_b = exit_b  # Default to WebSocket price
+        
         if position.get('is_live') and self.executor and position.get('ticket_a'):
             print(f"\n🔒 CLOSING LIVE POSITION: {position['pair_name']}")
             
@@ -331,6 +353,42 @@ class PositionManager:
             
             if close_result['success']:
                 print(f"✅ LIVE POSITION CLOSED SUCCESSFULLY")
+                
+                # v4: USE ACTUAL MT5 CLOSE PRICES instead of WebSocket prices!
+                if close_result.get('close_price_a', 0) > 0:
+                    actual_exit_a = close_result['close_price_a']
+                    print(f"   📊 Actual close A: {actual_exit_a:.5f} (was {exit_a:.5f})")
+                    
+                if close_result.get('close_price_b', 0) > 0:
+                    actual_exit_b = close_result['close_price_b']
+                    print(f"   📊 Actual close B: {actual_exit_b:.5f} (was {exit_b:.5f})")
+                    
+                # v4: Recalculate PnL with ACTUAL MT5 prices
+                pair_a = position['pair_a']
+                pair_b = position['pair_b']
+                action_a = position['action_a']
+                action_b = position['action_b']
+                
+                # Recalculate leg A PnL
+                pip_mult_a = get_pip_multiplier(pair_a)
+                if action_a == "BUY":
+                    pnl_a = (actual_exit_a - position['entry_a']) * pip_mult_a
+                else:
+                    pnl_a = (position['entry_a'] - actual_exit_a) * pip_mult_a
+                
+                # Recalculate leg B PnL
+                pip_mult_b = get_pip_multiplier(pair_b)
+                if action_b == "BUY":
+                    pnl_b = (actual_exit_b - position['entry_b']) * pip_mult_b
+                else:
+                    pnl_b = (position['entry_b'] - actual_exit_b) * pip_mult_b
+                    
+                # Update exit prices to actuals
+                exit_a = actual_exit_a
+                exit_b = actual_exit_b
+                total_pnl = pnl_a + pnl_b
+                
+                print(f"   📊 Actual PnL: {pnl_a:+.1f} + {pnl_b:+.1f} = {total_pnl:+.1f} pips")
             else:
                 print(f"⚠️ LIVE CLOSE HAD ISSUES - Check MT5 manually")
                 print(f"   Ticket A: #{position['ticket_a']}")

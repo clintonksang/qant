@@ -200,6 +200,7 @@ class MT5Executor:
             "volume": self.volume,
             "type": order_type,
             "magic": self.magic,
+            "deviation": 20,  # v4: Added deviation for slippage tolerance
             "comment": comment[:15]  # MT5 truncates comments
         }
         
@@ -213,7 +214,7 @@ class MT5Executor:
             position: Position dict with ticket_a, ticket_b, pair_a, pair_b, action_a, action_b
             
         Returns:
-            Dict with close results for both legs
+            Dict with close results for both legs INCLUDING actual close prices
         """
         pair_name = position.get('pair_name', 'UNKNOWN')
         print(f"\n🔒 CLOSING ARBITRAGE POSITION: {pair_name}")
@@ -231,8 +232,11 @@ class MT5Executor:
         )
         
         success_a = result_a.get('result', {}).get('retcode') == 10009 or 'message' in result_a
+        # v4: Extract actual close price from MT5 response
+        close_price_a = result_a.get('result', {}).get('price', 0)
+        
         if success_a:
-            print(f"   ✅ Leg A closed: Ticket #{position['ticket_a']}")
+            print(f"   ✅ Leg A closed: Ticket #{position['ticket_a']} @ {close_price_a:.5f}")
         else:
             print(f"   ❌ Leg A close failed: {result_a}")
         
@@ -245,15 +249,21 @@ class MT5Executor:
         )
         
         success_b = result_b.get('result', {}).get('retcode') == 10009 or 'message' in result_b
+        # v4: Extract actual close price from MT5 response
+        close_price_b = result_b.get('result', {}).get('price', 0)
+        
         if success_b:
-            print(f"   ✅ Leg B closed: Ticket #{position['ticket_b']}")
+            print(f"   ✅ Leg B closed: Ticket #{position['ticket_b']} @ {close_price_b:.5f}")
         else:
             print(f"   ❌ Leg B close failed: {result_b}")
         
         return {
             'success': success_a and success_b,
             'result_a': result_a,
-            'result_b': result_b
+            'result_b': result_b,
+            # v4: Return actual MT5 close prices for accurate PnL
+            'close_price_a': close_price_a,
+            'close_price_b': close_price_b
         }
     
     def _close_position(self, ticket, symbol, volume, position_type):

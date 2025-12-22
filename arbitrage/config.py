@@ -30,15 +30,21 @@ MT5_SYMBOL_MAP = {
     "eurgbp": "EURGBPm",
     "audcad": "AUDCADm",
     "nzdcad": "NZDCADm",
+    "audnzd": "AUDNZDm",  # v3: Added
+    "eurchf": "EURCHFm",  # v3: Added
+    "gbpchf": "GBPCHFm",  # v3: Added
 }
 
 # ============================================================
 # CURRENCY PAIR CORRELATIONS (2025 Data)
 # ============================================================
 
-# Positively Correlated Pairs (move together)
-# When one moves up, the other typically follows
+# ============================================================
+# POSITIVELY CORRELATED PAIRS (move together)
+# v3: EXPANDED for more trading opportunities
+# ============================================================
 POSITIVE_PAIRS = [
+    # === MAJOR PAIRS ===
     {
         "pair_a": "eurusd",
         "pair_b": "gbpusd", 
@@ -53,12 +59,30 @@ POSITIVE_PAIRS = [
         "name": "COMMODITY_TWINS",
         "description": "Commodity twins - both sensitive to China demand & risk sentiment"
     },
-     
+    # === JPY CROSSES - HIGH VOLATILITY, MORE PIPS ===
+    {
+        "pair_a": "eurjpy",
+        "pair_b": "gbpjpy",
+        "expected_corr": 0.92,
+        "name": "JPY_CROSSES",
+        "description": "EUR/JPY and GBP/JPY - high volatility, strong correlation"
+    },
+    # === CROSS PAIRS ===
+    {
+        "pair_a": "eurgbp",
+        "pair_b": "audnzd",
+        "expected_corr": 0.75,
+        "name": "CROSS_PAIRS",
+        "description": "Cross pairs that often move together during risk events"
+    },
 ]
 
-# Negatively Correlated Pairs (move opposite)
-# When one moves up, the other typically moves down
+# ============================================================
+# NEGATIVELY CORRELATED PAIRS (move opposite)
+# v3: EXPANDED for more trading opportunities
+# ============================================================
 NEGATIVE_PAIRS = [
+    # === MOST STABLE NEGATIVE CORRELATION ===
     {
         "pair_a": "eurusd",
         "pair_b": "usdchf",
@@ -66,18 +90,29 @@ NEGATIVE_PAIRS = [
         "name": "EUR_CHF_MIRROR",
         "description": "Most stable negative correlation - Euro and Swiss Franc both vs Dollar"
     },
-    # DISABLED: COMMODITY_SPLIT has 0% win rate - not mean reverting
-    # {
-    #     "pair_a": "audusd",
-    #     "pair_b": "usdcad",
-    #     "expected_corr": -0.85,
-    #     "name": "COMMODITY_SPLIT",
-    #     "description": "AUD (metals) vs CAD (oil) - different commodity exposures"
-    # },
+    # === USD INDEX MIRRORS ===
+    {
+        "pair_a": "gbpusd",
+        "pair_b": "usdcad",
+        "expected_corr": -0.80,
+        "name": "GBP_CAD_MIRROR",
+        "description": "GBP strength often mirrors CAD weakness vs USD"
+    },
+    # === COMMODITY INVERSE ===
+    {
+        "pair_a": "audusd",
+        "pair_b": "usdcad",
+        "expected_corr": -0.75,
+        "name": "COMMODITY_SPLIT",
+        "description": "AUD (metals) vs CAD (oil) - can diverge during commodity shifts"
+    },
 ]
 
-# Pairs to skip based on historical performance
-DISABLED_PAIRS = ["COMMODITY_SPLIT"]  # 0% win rate - not mean reverting
+# Pairs to skip if they consistently lose
+DISABLED_PAIRS = [
+    "COMMODITY_SPLIT",
+    "GBP_CAD_MIRROR"
+]  # v3: Try all pairs, disable based on performance
 
 # All tickers to subscribe to
 ALL_TICKERS = list(set(
@@ -86,43 +121,53 @@ ALL_TICKERS = list(set(
 ))
 
 # ============================================================
-# TRADING PARAMETERS
+# TRADING PARAMETERS - AGGRESSIVE MODE (v3)
 # ============================================================
+# Optimized for frequent trading and maximizing pip capture
 
-# Signal Detection
-Z_SCORE_ENTRY_THRESHOLD = 2.0      # Minimum Z-score to generate signal
-Z_SCORE_EXTREME_THRESHOLD = 3.0    # Extreme divergence - may be regime change
-Z_SCORE_EXIT_THRESHOLD = 0.5       # Close when spread normalizes
-SKIP_EXTREME_ZSCORE = True         # Skip trades with Z-score > 3.0 (regime changes)
+# Signal Detection - BALANCED (v4: Quality over quantity)
+Z_SCORE_ENTRY_THRESHOLD = 1.8      # v4: Raised from 1.5 (only take stronger signals)
+Z_SCORE_EXTREME_THRESHOLD = 3.5    # v3: Raised from 3.0 (take stronger signals)
+Z_SCORE_EXIT_THRESHOLD = 0.4       # v4: Raised from 0.3 (exit a bit earlier)
+SKIP_EXTREME_ZSCORE = False        # v3: Don't skip extreme - they can be profitable
 
-# Correlation Health
-CORRELATION_DRIFT_WARNING = 0.15   # Warn if correlation drifts by this much
-CORRELATION_BREAKDOWN = 0.25       # Skip trades if correlation broken by this much
+# Take Profit Enhancement
+Z_SCORE_TAKE_PROFIT = 0.2          # v3: NEW - Close early if reverted well
+MIN_PROFIT_PIPS = 3.0              # v3: NEW - Minimum pips before time exit
 
-# Position Management
-MAX_CONCURRENT_TRADES = 2          # v2: Reduced from 3 (focus on quality)
-MAX_HOLD_MINUTES = 15              # v2: Reduced from 60 (31min hold lost -9.4 pips!)
-STOP_LOSS_ZSCORE = 3.5             # Stop if Z-score goes further against us
+# v4: LOSS PROTECTION - Cut losers early!
+MAX_LOSS_PIPS = -4.0               # v4: Exit if losing more than 4 pips (prevents -6.6 disasters)
+LOSS_EXIT_MINUTES = 10             # v4: After 10 min, exit if losing ANY amount
 
-# Risk Management
-CONSECUTIVE_LOSS_PAUSE = 3         # Pause after this many losses
-MIN_MINUTES_BETWEEN_TRADES = 8     # v2: Increased from 5 (reduce overtrading)
+# Correlation Health - RELAXED
+CORRELATION_DRIFT_WARNING = 0.20   # v3: Relaxed from 0.15
+CORRELATION_BREAKDOWN = 0.30       # v3: Relaxed from 0.25 (trade more pairs)
 
-# v2: Per-pair hold limits (some pairs need faster exits)
+# Position Management - BALANCED (v4: Tighter risk control)
+MAX_CONCURRENT_TRADES = 3          # v4: Reduced to 3 (less exposure)
+MAX_HOLD_MINUTES = 15              # v4: Reduced from 20 (cut losers faster)
+STOP_LOSS_ZSCORE = 3.5             # v4: Tightened from 4.0 (less room to bleed)
+
+# Risk Management - BALANCED (v4: Don't rush into trades)
+CONSECUTIVE_LOSS_PAUSE = 4         # v4: Reduced from 5 (pause after fewer losses)
+MIN_MINUTES_BETWEEN_TRADES = 3     # v4: Increased from 2 (don't rush re-entry)
+
+# v4: Per-pair hold limits - TIGHTENED TO CUT LOSSES
 PAIR_MAX_HOLD = {
-    "EUR_GBP": 10,          # EUR_GBP underperforming - faster exit
-    "EUR_CHF_MIRROR": 15,   # Star performer - give it room
-    "COMMODITY_TWINS": 12,  # Moderate
-    # "JPY_CROSSES": 10,      # JPY volatile - faster exit
+    "EUR_GBP": 10,          # v4: Reduced from 15 (was causing -6.6 loss at 22 min!)
+    "EUR_CHF_MIRROR": 15,   # v4: Reduced from 20 (your star performer - still generous)
+    "COMMODITY_TWINS": 12,  # v4: Reduced from 15
+    "JPY_CROSSES": 10,      # v4: JPY volatile - keep short
+    "CROSS_PAIRS": 10,      # v4: Cross pairs - keep short
 }
 
-# Data Requirements
-LOOKBACK_PERIOD = 30               # Minutes of data for correlation
-MIN_DATA_POINTS = 15               # Minimum data points before trading
-BUFFER_SIZE = 60                   # Price buffer size (minutes)
+# Data Requirements - FASTER WARMUP
+LOOKBACK_PERIOD = 20               # v3: Reduced from 30 (faster startup)
+MIN_DATA_POINTS = 10               # v3: Reduced from 15 (trade sooner)
+BUFFER_SIZE = 45                   # v3: Reduced from 60
 
-# Learning Mode
-LEARNING_TRADES_REQUIRED = 20      # Build this much history before filtering
+# Learning Mode - FASTER
+LEARNING_TRADES_REQUIRED = 10      # v3: Reduced from 20 (learn faster)
 
 # ============================================================
 # TRADING SESSIONS (UTC)
@@ -143,16 +188,29 @@ def get_session(hour_utc):
     return "ASIAN"  # Wrap around
 
 # ============================================================
-# PAIR METADATA
+# PAIR METADATA - v3: EXPANDED
 # ============================================================
 PAIR_INFO = {
+    # Major pairs (0.0001 pip value)
     "eurusd": {"pip_value": 0.0001, "name": "EUR/USD", "liquidity": "HIGH"},
     "gbpusd": {"pip_value": 0.0001, "name": "GBP/USD", "liquidity": "HIGH"},
     "audusd": {"pip_value": 0.0001, "name": "AUD/USD", "liquidity": "MEDIUM"},
     "nzdusd": {"pip_value": 0.0001, "name": "NZD/USD", "liquidity": "MEDIUM"},
     "usdchf": {"pip_value": 0.0001, "name": "USD/CHF", "liquidity": "MEDIUM"},
     "usdcad": {"pip_value": 0.0001, "name": "USD/CAD", "liquidity": "MEDIUM"},
+    # JPY pairs (0.01 pip value) - MORE PIPS!
     "eurjpy": {"pip_value": 0.01, "name": "EUR/JPY", "liquidity": "HIGH"},
     "gbpjpy": {"pip_value": 0.01, "name": "GBP/JPY", "liquidity": "HIGH"},
+    "audjpy": {"pip_value": 0.01, "name": "AUD/JPY", "liquidity": "MEDIUM"},
+    "nzdjpy": {"pip_value": 0.01, "name": "NZD/JPY", "liquidity": "MEDIUM"},
+    "cadjpy": {"pip_value": 0.01, "name": "CAD/JPY", "liquidity": "MEDIUM"},
+    "chfjpy": {"pip_value": 0.01, "name": "CHF/JPY", "liquidity": "MEDIUM"},
+    # Cross pairs (0.0001 pip value)
+    "eurgbp": {"pip_value": 0.0001, "name": "EUR/GBP", "liquidity": "HIGH"},
+    "audnzd": {"pip_value": 0.0001, "name": "AUD/NZD", "liquidity": "MEDIUM"},
+    "eurchf": {"pip_value": 0.0001, "name": "EUR/CHF", "liquidity": "MEDIUM"},
+    "gbpchf": {"pip_value": 0.0001, "name": "GBP/CHF", "liquidity": "MEDIUM"},
+    "audcad": {"pip_value": 0.0001, "name": "AUD/CAD", "liquidity": "MEDIUM"},
+    "nzdcad": {"pip_value": 0.0001, "name": "NZD/CAD", "liquidity": "MEDIUM"},
 }
 

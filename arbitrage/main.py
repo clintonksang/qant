@@ -129,9 +129,9 @@ last_regime_check = 0
 warmup_complete = False
 ticks_received = {ticker: 0 for ticker in ALL_TICKERS}
 
-CORRELATION_CHECK_INTERVAL = 60      # Check correlations every 60 seconds
-REGIME_CHECK_INTERVAL = 900          # Check market regime every 15 minutes
-STATUS_PRINT_INTERVAL = 300          # Print status every 5 minutes
+CORRELATION_CHECK_INTERVAL = 30      # v3: Reduced to 30 seconds (faster signals!)
+REGIME_CHECK_INTERVAL = 600          # v3: Reduced to 10 minutes
+STATUS_PRINT_INTERVAL = 180          # v3: Print status every 3 minutes
 last_status_print = 0
 last_tick_time = time.time()  # Track last successful tick
 
