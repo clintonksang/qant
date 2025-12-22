@@ -78,7 +78,7 @@ Proposed Actions:
 **TRADE if:**
 - Z-Score is between 2.0 and 3.0 (strong but not extreme)
 - Correlation health is HEALTHY or DRIFTING (not BROKEN)
-- Historical win rate >= 45% (or no history yet - learning mode)
+- Historical win rate >= 34% (or no history yet - learning mode)
 - Mean reversion rate is decent (> 40%)
 
 **SKIP if:**
