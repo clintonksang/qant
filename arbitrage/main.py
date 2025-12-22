@@ -247,6 +247,9 @@ while True:
         # ============================================================
         if timestamp.minute != current_minute:
             
+            # Get current time for interval checks
+            current_time = time.time()
+            
             # Store candle close prices
             for t in ALL_TICKERS:
                 if candle_buffers[t]['close'] > 0:
