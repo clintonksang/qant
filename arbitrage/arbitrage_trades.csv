@@ -1,0 +1,1 @@
+TradeID,Timestamp,PairName,PairA,ActionA,EntryA,ExitA,PnlA,TicketA,PairB,ActionB,EntryB,ExitB,PnlB,TicketB,EntryZScore,ExitZScore,TotalPnL,HoldMinutes,Status,ExitReason,LiveTrade
