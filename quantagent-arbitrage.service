@@ -1,0 +1,19 @@
+[Unit]
+Description=QuantAgent Arbitrage Bot
+After=network.target
+
+[Service]
+Type=simple
+User=YOUR_USERNAME
+Group=YOUR_USERNAME
+WorkingDirectory=/opt/quantagent/arbitrage
+Environment="PATH=/opt/quantagent/venv/bin"
+ExecStart=/opt/quantagent/venv/bin/python3 /opt/quantagent/arbitrage/main.py
+Restart=always
+RestartSec=10
+StandardOutput=append:/opt/quantagent/logs/arbitrage.log
+StandardError=append:/opt/quantagent/logs/arbitrage_error.log
+
+[Install]
+WantedBy=multi-user.target
+
