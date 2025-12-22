@@ -125,19 +125,24 @@ ALL_TICKERS = list(set(
 # ============================================================
 # Optimized for frequent trading and maximizing pip capture
 
-# Signal Detection - BALANCED (v4: Quality over quantity)
-Z_SCORE_ENTRY_THRESHOLD = 1.8      # v4: Raised from 1.5 (only take stronger signals)
-Z_SCORE_EXTREME_THRESHOLD = 3.5    # v3: Raised from 3.0 (take stronger signals)
-Z_SCORE_EXIT_THRESHOLD = 0.4       # v4: Raised from 0.3 (exit a bit earlier)
+# Signal Detection - PROFIT MAXIMIZED (v5)
+Z_SCORE_ENTRY_THRESHOLD = 1.8      # v4: Good balance of quality signals
+Z_SCORE_EXTREME_THRESHOLD = 3.5    # v3: Take stronger signals
+Z_SCORE_EXIT_THRESHOLD = 0.3       # v5: Lowered from 0.4 (capture more of the move)
 SKIP_EXTREME_ZSCORE = False        # v3: Don't skip extreme - they can be profitable
 
-# Take Profit Enhancement
-Z_SCORE_TAKE_PROFIT = 0.2          # v3: NEW - Close early if reverted well
-MIN_PROFIT_PIPS = 3.0              # v3: NEW - Minimum pips before time exit
+# Take Profit Enhancement - LET WINNERS RUN (v5)
+Z_SCORE_TAKE_PROFIT = 0.2          # Close early if reverted well
+MIN_PROFIT_PIPS = 5.0              # v5: Raised from 3.0 (let winners run!)
 
 # v4: LOSS PROTECTION - Cut losers early!
 MAX_LOSS_PIPS = -4.0               # v4: Exit if losing more than 4 pips (prevents -6.6 disasters)
 LOSS_EXIT_MINUTES = 10             # v4: After 10 min, exit if losing ANY amount
+
+# v5: PROFIT PROTECTION - Lock in gains!
+BREAKEVEN_TRIGGER_PIPS = 1.0       # v5: Move SL to breakeven at +1 pip
+TRAILING_STOP_TRIGGER = 2.5        # v5: Start trailing after +2.5 pips profit
+TRAILING_STOP_DISTANCE = 1.0       # v5: Trail by 1 pip
 
 # Correlation Health - RELAXED
 CORRELATION_DRIFT_WARNING = 0.20   # v3: Relaxed from 0.15
@@ -152,13 +157,13 @@ STOP_LOSS_ZSCORE = 3.5             # v4: Tightened from 4.0 (less room to bleed)
 CONSECUTIVE_LOSS_PAUSE = 4         # v4: Reduced from 5 (pause after fewer losses)
 MIN_MINUTES_BETWEEN_TRADES = 3     # v4: Increased from 2 (don't rush re-entry)
 
-# v4: Per-pair hold limits - TIGHTENED TO CUT LOSSES
+# v5: Per-pair hold limits - EXTENDED FOR WINNERS (losers protected by MAX_LOSS/TIMED_LOSS)
 PAIR_MAX_HOLD = {
-    "EUR_GBP": 10,          # v4: Reduced from 15 (was causing -6.6 loss at 22 min!)
-    "EUR_CHF_MIRROR": 15,   # v4: Reduced from 20 (your star performer - still generous)
-    "COMMODITY_TWINS": 12,  # v4: Reduced from 15
-    "JPY_CROSSES": 10,      # v4: JPY volatile - keep short
-    "CROSS_PAIRS": 10,      # v4: Cross pairs - keep short
+    "EUR_GBP": 15,          # v5: Extended from 10 (losers cut by -4 pip or 10min rule)
+    "EUR_CHF_MIRROR": 20,   # v5: Extended (star performer - let it run!)
+    "COMMODITY_TWINS": 18,  # v5: Extended from 12
+    "JPY_CROSSES": 15,      # v5: Extended (high volatility = bigger moves)
+    "CROSS_PAIRS": 12,      # v5: Slight extension
 }
 
 # Data Requirements - FASTER WARMUP

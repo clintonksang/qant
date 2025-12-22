@@ -20,9 +20,12 @@ from config import (
     LIVE_TRADING,
     MT5_VOLUME,
     MT5_MAGIC,
-    MIN_PROFIT_PIPS,      # v3: New profit threshold
-    MAX_LOSS_PIPS,        # v4: Maximum loss before exit
-    LOSS_EXIT_MINUTES,    # v4: Exit losers after this time
+    MIN_PROFIT_PIPS,          # v3: New profit threshold
+    MAX_LOSS_PIPS,            # v4: Maximum loss before exit
+    LOSS_EXIT_MINUTES,        # v4: Exit losers after this time
+    BREAKEVEN_TRIGGER_PIPS,   # v5: Move to breakeven at this profit
+    TRAILING_STOP_TRIGGER,    # v5: Start trailing at this profit
+    TRAILING_STOP_DISTANCE,   # v5: Trail by this many pips
 )
 
 
@@ -286,11 +289,46 @@ class PositionManager:
             pair_name = position['pair_name']
             max_hold = PAIR_MAX_HOLD.get(pair_name, MAX_HOLD_MINUTES)
             
+            # ============================================================
+            # v5: PROFIT PROTECTION - Breakeven & Trailing Stop
+            # ============================================================
+            
+            # Initialize tracking if not present
+            if 'breakeven_locked' not in position:
+                position['breakeven_locked'] = False
+                position['trailing_stop'] = None
+                position['max_profit_seen'] = 0
+            
+            # Track maximum profit seen
+            if total_pnl > position['max_profit_seen']:
+                position['max_profit_seen'] = total_pnl
+            
+            # Breakeven: Lock in at least 0 pips once we hit trigger
+            if not position['breakeven_locked'] and total_pnl >= BREAKEVEN_TRIGGER_PIPS:
+                position['breakeven_locked'] = True
+                position['trailing_stop'] = 0  # Can't lose now!
+                print(f"   🔒 {pair_name}: Breakeven locked at +{total_pnl:.1f} pips")
+            
+            # Trailing Stop: Trail by TRAILING_STOP_DISTANCE once we hit trigger
+            if total_pnl >= TRAILING_STOP_TRIGGER:
+                new_trail = total_pnl - TRAILING_STOP_DISTANCE
+                if position['trailing_stop'] is None or new_trail > position['trailing_stop']:
+                    position['trailing_stop'] = new_trail
+                    print(f"   📈 {pair_name}: Trailing stop moved to +{new_trail:.1f} pips")
+            
+            # Check if trailing stop hit
+            if position['trailing_stop'] is not None and total_pnl <= position['trailing_stop']:
+                exit_reason = "TRAILING_STOP"
+            
+            # ============================================================
+            # Standard Exit Conditions
+            # ============================================================
+            
             # 1. Mean reversion - take profit (spread normalized)
-            if abs(z_score) < Z_SCORE_EXIT_THRESHOLD:
+            elif abs(z_score) < Z_SCORE_EXIT_THRESHOLD:
                 exit_reason = "MEAN_REVERSION"
             
-            # 2. v3: PROFIT TARGET - Exit if we hit minimum profit threshold
+            # 2. v5: PROFIT TARGET - Exit if we hit minimum profit threshold
             elif total_pnl >= MIN_PROFIT_PIPS:
                 exit_reason = "PROFIT_TARGET"
             
@@ -437,6 +475,14 @@ class PositionManager:
         print(f"   LEG B: {pnl_b:+.1f} pips ({position['entry_b']:.5f} → {exit_b:.5f})")
         if position.get('ticket_b'):
             print(f"          Ticket: #{position['ticket_b']}")
+        print(f"   ")
+        # v5: Show profit protection info
+        if position.get('max_profit_seen', 0) > 0:
+            print(f"   📊 Max profit seen: +{position['max_profit_seen']:.1f} pips")
+        if position.get('breakeven_locked'):
+            print(f"   🔒 Breakeven was locked")
+        if position.get('trailing_stop') is not None:
+            print(f"   📈 Trailing stop was at: +{position['trailing_stop']:.1f} pips")
         print(f"   ")
         print(f"   TOTAL PnL: {total_pnl:+.1f} pips")
         print(f"   Session Total: {self.total_pnl:+.1f} pips")
