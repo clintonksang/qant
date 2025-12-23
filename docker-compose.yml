@@ -1,0 +1,34 @@
+services:
+  # ============================================================
+  # Rex Gold Trading Bot
+  # ============================================================
+  rex-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: quantagent-rex
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - REX_LIVE_TRADING=true
+      # Slack Integration (optional - set in .env):
+      # - SLACK_WEBHOOK_URL=your-slack-webhook-url-here
+      # - SLACK_CHANNEL=#rex-trading
+    working_dir: /app
+    command: ["python", "rex.py"]
+    volumes:
+      - ./rex_trades.csv:/app/rex_trades.csv
+      - ./.rex_state.pkl:/app/.rex_state.pkl
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+    networks:
+      - quantagent-network
+
+networks:
+  quantagent-network:
+    driver: bridge
