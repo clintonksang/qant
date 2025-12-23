@@ -44,18 +44,31 @@ services:
       - quantagent-network
 
   # ============================================================
-  # Optional: Log viewer with tail
+  # Rex Gold Trading Bot
   # ============================================================
-  # log-viewer:
-  #   image: alpine:latest
-  #   container_name: quantagent-logs
-  #   command: tail -f /logs/arbitrage_trades.csv
-  #   volumes:
-  #     - ./arbitrage:/logs:ro
-  #   depends_on:
-  #     - arbitrage-bot
-  #   networks:
-  #     - quantagent-network
+  rex-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: quantagent-rex
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - REX_LIVE_TRADING=true
+    working_dir: /app
+    command: ["python", "rex.py"]
+    volumes:
+      - ./rex_trades.csv:/app/rex_trades.csv
+      - ./.rex_state.pkl:/app/.rex_state.pkl
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+    networks:
+      - quantagent-network
 
 networks:
   quantagent-network:
