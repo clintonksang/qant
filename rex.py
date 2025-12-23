@@ -123,25 +123,29 @@ def load_state():
 # ============================================================
 # FAST SCALPING CONFIG - Tuned for quick trend captures
 # ============================================================
-# Before: SL $2.50 / TP $5.00 = Too slow, market reverses before TP
-# Now: Tighter targets + trailing stop + time exit
+# v9: 3:1 RISK/REWARD - Profitable at 25% win rate!
+# Before: SL $2.00 / TP $2.50 = 1.25:1 R:R (need 45% win rate)
+# Now:    SL $2.00 / TP $6.00 = 3:1 R:R (need 25% win rate)
 # ============================================================
 
-# Risk Parameters
-SL_PIPS = 2.00  # Stop Loss in dollars (tighter for scalping)
-TP_PIPS = 2.50  # Take Profit in dollars (1.25:1 R:R - faster exits)
-MAX_TRADES = 1  # v6 FIX: Only 1 trade at a time (was 2 - caused duplicates)
+# Risk Parameters - 3:1 RISK/REWARD
+SL_PIPS = 2.00  # Stop Loss in dollars (risk per trade)
+TP_PIPS = 6.00  # Take Profit = 3x SL = $6.00 (3:1 R:R)
+MAX_TRADES = 1  # Only 1 trade at a time
 MAX_CONSECUTIVE_LOSSES = 3  # Pause trading after 3 losses
-MIN_MINUTES_BETWEEN_TRADES = 5  # v6: Slower re-entry (was 4) - quality over quantity
+MIN_MINUTES_BETWEEN_TRADES = 5  # Quality over quantity
 
-# Scalping Enhancements - THE KEY TO FASTER PROFITS
-# v4 FIX: Trailing was too tight, capturing tiny wins while losses stay full
-#   Before: Trigger $1.50, Buffer $0.20 → Avg win $1.39 vs Avg loss $2.00 
-#   After:  Trigger $1.80, Buffer $0.70 → Lock in at least $0.70 minimum profit
-TRAILING_TRIGGER = 1.80  # When up $1.80, start trailing (gives more room)
-TRAILING_STEP = 0.40     # Trail SL by $0.40 increments (tighter once in profit)
-MAX_HOLD_MINUTES = 8     # v6 FIX: Force close after 8 min (was 12 - trade #17 stuck 2.5hr)
-BREAKEVEN_BUFFER = 0.70  # Lock in $0.70 minimum when trailing starts
+# v9: TP EXTENSION - When near TP, extend instead of closing!
+# Why? Your trades #7,11,12,13 all hit TP exactly, then price continued moving
+TP_EXTENSION_THRESHOLD = 0.85  # When at 85% of TP ($5.10 profit), extend!
+TP_EXTENSION_AMOUNT = 3.00     # Extend TP by $3.00 more (9R total potential)
+TP_EXTENSION_LOCK = 4.00       # Lock in $4.00 profit (2R guaranteed) when extending
+
+# Trailing Stop Parameters (kicks in at 1R profit)
+TRAILING_TRIGGER = 2.00  # When up $2.00 (1R), start trailing
+TRAILING_STEP = 0.50     # Trail SL by $0.50 increments
+MAX_HOLD_MINUTES = 15    # v9: Longer hold for 3:1 targets (was 8)
+BREAKEVEN_BUFFER = 1.00  # Lock in $1.00 minimum when trailing starts
 
 # v6: EXHAUSTION PROTECTION - Don't trade after massive moves
 EXHAUSTION_THRESHOLD = 20.0   # If price moved $20+ in 10min, market is exhausted
@@ -874,6 +878,7 @@ def open_trade(side, entry_price, timestamp, trend_analysis, rsi, sma, detected_
         "entry": actual_entry,  # v8: Use MT5 price if available
         "sl": sl,
         "tp": tp,
+        "original_tp_distance": TP_PIPS,  # v9: For TP extension calculation
         "time": timestamp,
         "open_timestamp": time.time(),  # For hold time calculation
         "mt5_ticket": mt5_ticket,  # v8: MT5 ticket for live trades
@@ -959,10 +964,43 @@ def check_trade_exit(current_price):
         
         hold_minutes = (time.time() - trade.get("open_timestamp", time.time())) / 60
         
-        # === v8: DYNAMIC SL - RUN WITH WINNERS ===
+        # === v9: DYNAMIC SL + TP EXTENSION - RUN WITH WINNERS ===
         sl_updated = False
+        tp_updated = False
+        original_tp_distance = trade.get("original_tp_distance", TP_PIPS)
         
-        # 1. FULL TRAILING: +$1.80 profit - trail aggressively
+        # 0. v9: TP EXTENSION - When near TP (85%), EXTEND instead of closing!
+        # This is the key to letting winners run
+        tp_progress = current_pnl / original_tp_distance  # What % of TP have we reached?
+        
+        if tp_progress >= TP_EXTENSION_THRESHOLD and not trade.get("tp_extended"):
+            # We're at 85%+ of TP - EXTEND the target!
+            old_tp = trade["tp"]
+            old_sl = trade["sl"]
+            
+            if side == "BUY":
+                new_tp = trade["tp"] + TP_EXTENSION_AMOUNT  # Extend TP by $3
+                new_sl = entry + TP_EXTENSION_LOCK  # Lock in $4 profit (2R)
+                trade["tp"] = new_tp
+                trade["sl"] = new_sl
+            else:  # SELL
+                new_tp = trade["tp"] - TP_EXTENSION_AMOUNT
+                new_sl = entry - TP_EXTENSION_LOCK
+                trade["tp"] = new_tp
+                trade["sl"] = new_sl
+            
+            tp = trade["tp"]
+            sl = trade["sl"]
+            trade["tp_extended"] = True
+            trade["extension_count"] = trade.get("extension_count", 0) + 1
+            sl_updated = True
+            tp_updated = True
+            
+            print(f"\n🚀 TP EXTENSION #{trade['extension_count']}! Progress: {tp_progress*100:.0f}%")
+            print(f"   TP: {old_tp:.2f} → {new_tp:.2f} (+${TP_EXTENSION_AMOUNT})")
+            print(f"   SL: {old_sl:.2f} → {new_sl:.2f} (locked ${TP_EXTENSION_LOCK} profit)")
+        
+        # 1. FULL TRAILING: After 1R profit ($2.00), trail aggressively
         if current_pnl >= TRAILING_TRIGGER:
             if side == "BUY":
                 new_sl = entry + BREAKEVEN_BUFFER + ((current_pnl - TRAILING_TRIGGER) // TRAILING_STEP) * TRAILING_STEP
@@ -985,10 +1023,10 @@ def check_trade_exit(current_price):
                         print(f"\n📈 TRAILING: SL {old_sl:.2f} → {new_sl:.2f} (lock ${entry - new_sl:.2f})")
                         trade["trailing_logged"] = True
         
-        # 2. v8: BREAKEVEN: +$0.50 profit - protect the win
-        elif current_pnl >= 0.50 and not trade.get("breakeven_set"):
+        # 2. BREAKEVEN: +$1.00 profit (0.5R) - protect the win
+        elif current_pnl >= 1.00 and not trade.get("breakeven_set"):
             if side == "BUY":
-                new_sl = entry + 0.20  # Lock $0.20 profit
+                new_sl = entry + 0.30  # Lock $0.30 profit
                 if new_sl > trade["sl"]:
                     old_sl = trade["sl"]
                     trade["sl"] = new_sl
@@ -997,7 +1035,7 @@ def check_trade_exit(current_price):
                     trade["breakeven_set"] = True
                     print(f"\n🔒 BREAKEVEN: SL {old_sl:.2f} → {new_sl:.2f} (protected)")
             else:
-                new_sl = entry - 0.20
+                new_sl = entry - 0.30
                 if new_sl < trade["sl"]:
                     old_sl = trade["sl"]
                     trade["sl"] = new_sl
@@ -1006,9 +1044,9 @@ def check_trade_exit(current_price):
                     trade["breakeven_set"] = True
                     print(f"\n🔒 BREAKEVEN: SL {old_sl:.2f} → {new_sl:.2f} (protected)")
         
-        # v8: Update SL on MT5 if changed
-        if sl_updated and is_live and mt5 and mt5_ticket:
-            mt5.modify_sl_tp(mt5_ticket, new_sl=sl, current_tp=tp)
+        # v9: Update SL and/or TP on MT5 if changed
+        if (sl_updated or tp_updated) and is_live and mt5 and mt5_ticket:
+            mt5.modify_sl_tp(mt5_ticket, new_sl=sl, new_tp=tp if tp_updated else None)
         
         # === v8: TIME EXIT - ONLY FOR LOSERS ===
         if hold_minutes >= MAX_HOLD_MINUTES:
@@ -1156,17 +1194,16 @@ if LIVE_TRADING:
         LIVE_TRADING = False
         mt5 = None
 
-print("🚀 Rex v8.0 (Live MT5 + Dynamic SL) is Live...")
-print(f"   🎯 v8.0 FEATURES:")
+print("🚀 Rex v9.0 (3:1 R:R + TP Extension) is Live...")
+print(f"   🎯 v9.0 NEW FEATURES:")
+print(f"      - 📊 3:1 R:R: SL ${SL_PIPS} / TP ${TP_PIPS} (profitable at 25% win rate)")
+print(f"      - 🚀 TP EXTENSION: At {TP_EXTENSION_THRESHOLD*100:.0f}% TP, extend by ${TP_EXTENSION_AMOUNT} & lock ${TP_EXTENSION_LOCK}")
 print(f"      - 🔥 LIVE TRADING: {'ENABLED' if LIVE_TRADING else 'DISABLED'}")
-print(f"      - 📈 RUN WITH WINNERS: Trail SL on profit, no time exit")
+print(f"      - 📈 RUN WITH WINNERS: Trail SL, extend TP, never time-exit winners")
 print(f"      - ✂️ CUT LOSERS: Time exit only for losing trades")
-print(f"      - AUTO-RECONNECT: Survives network disconnects")
-print(f"   📊 Trend-Aware Filters:")
-print(f"      - RSI {RSI_OVERSOLD_DANGER}/{RSI_OVERBOUGHT_DANGER} only blocks counter-trend")
-print(f"   ⚙️ Core Settings:")
-print(f"      - MAX_TRADES: 1 | MAX_HOLD: {MAX_HOLD_MINUTES}min | COOLDOWN: {MIN_MINUTES_BETWEEN_TRADES}min")
-print(f"      - Trailing: +${TRAILING_TRIGGER} trigger, lock ${BREAKEVEN_BUFFER} minimum")
+print(f"   ⚙️ Settings:")
+print(f"      - MAX_HOLD: {MAX_HOLD_MINUTES}min | COOLDOWN: {MIN_MINUTES_BETWEEN_TRADES}min")
+print(f"      - Trailing: +${TRAILING_TRIGGER} trigger, +${TRAILING_STEP} steps")
 
 # v7.2: Load saved state if available (for recovery after disconnect)
 state_loaded = load_state()
