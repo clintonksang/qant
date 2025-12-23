@@ -367,14 +367,14 @@ while True:
         # ============================================================
         else:
             # Show live prices
-            pos_info = ""
-            if position_manager.active_positions:
-                status = position_manager.get_status()
-                live_tag = " [LIVE]" if status.get('live_trading') else ""
-                pos_info = f" | Positions: {status['active_positions']}{live_tag} | PnL: {status['total_pnl']:+.1f}"
-            
-            mode_icon = "🟢" if LIVE_TRADING else "📝"
-            print(f"\r{mode_icon} {ticker.upper()}: {price:.5f}{pos_info}    ", end="", flush=True)
+                pos_info = ""
+                if position_manager.active_positions:
+                    status = position_manager.get_status()
+                    live_tag = " [LIVE]" if status.get('live_trading') else ""
+                    pos_info = f" | Positions: {status['active_positions']}{live_tag} | PnL: {status['total_pnl']:+.1f}"
+                
+                mode_icon = "🟢" if LIVE_TRADING else "📝"
+                print(f"\r{mode_icon} {ticker.upper()}: {price:.5f}{pos_info}    ", end="", flush=True)
     
     except KeyboardInterrupt:
         print("\n\n🛑 Shutting down...")

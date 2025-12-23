@@ -271,6 +271,7 @@ closes = []
 candles_history = []  # Store full candle data for pattern detection
 current_min = None
 current_hour = None  # Track for hourly review
+current_session = None  # v10: Track current trading session for Slack notifications
 candle = {"high": 0, "low": 99999, "close": 0, "open": 0}
 last_trend_time = 0
 big_trend = "NEUTRAL"
@@ -1328,6 +1329,24 @@ if not connect_websocket():
     print("❌ Failed to connect. Exiting.")
     exit(1)
 
+# v10: Initialize current session on startup
+import datetime as dt
+startup_time = dt.datetime.now(dt.timezone.utc)
+current_session = execution.get_market_session(startup_time.hour)
+print(f"\n🌍 INITIAL SESSION: {current_session} ({startup_time.strftime('%H:%M UTC')})")
+
+# v10: Send startup session notification to Slack
+try:
+    slack_notifier.send_slack_message(
+        f"🚀 *REX Bot Started*\n"
+        f"Session: {current_session}\n"
+        f"Time: {startup_time.strftime('%Y-%m-%d %H:%M UTC')}\n"
+        f"Pair: {ACTIVE_PAIR.upper()}\n"
+        f"Live Trading: {'ENABLED' if LIVE_TRADING else 'DISABLED'}"
+    )
+except Exception as e:
+    print(f"[WARN] Startup notification error: {e}")
+
 last_state_save = time.time()
 STATE_SAVE_INTERVAL = 30  # Save state every 30 seconds
 
@@ -1376,6 +1395,24 @@ while True:
         if timestamp.minute != current_min:
             # Refresh 1H Trend - faster during volatile sessions (US_OVERLAP)
             session = execution.get_market_session(timestamp.hour)
+            
+            # v10: Session change detection - send Slack notification
+            if current_session is not None and session != current_session:
+                # Session changed!
+                try:
+                    slack_notifier.send_session_notification(
+                        old_session=current_session,
+                        new_session=session,
+                        timestamp=timestamp
+                    )
+                except Exception as sess_err:
+                    print(f"[WARN] Session notification error: {sess_err}")
+            
+            # Update current session
+            if current_session != session:
+                current_session = session
+                print(f"\n🌍 SESSION: {session} ({timestamp.strftime('%H:%M UTC')})")
+            
             refresh_interval = TREND_REFRESH_FAST if session in ["US_OVERLAP", "LONDON"] else TREND_REFRESH_SLOW
             
             if (time.time() - last_trend_time) > refresh_interval:

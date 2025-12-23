@@ -1,37 +1,22 @@
 """
 Slack Integration for Rex Trading Bot
 Sends hourly summaries and CSV files to Slack channel
+Uses Slack Webhooks (simpler than SDK)
 """
 import os
 import csv
+import requests
 from pathlib import Path
 from datetime import datetime
 
-# Try to import slack_sdk (optional dependency)
-try:
-    from slack_sdk import WebClient
-    from slack_sdk.errors import SlackApiError
-    SLACK_SDK_AVAILABLE = True
-except ImportError:
-    SLACK_SDK_AVAILABLE = False
-    print("⚠️ slack-sdk not installed. Run: pip install slack-sdk")
+# Initialize Slack webhook
+SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
+SLACK_CHANNEL = os.getenv("SLACK_CHANNEL", "#rex-trading")  # For display only
 
-# Initialize Slack client
-SLACK_TOKEN = os.getenv("SLACK_BOT_TOKEN")
-SLACK_CHANNEL = os.getenv("SLACK_CHANNEL", "#rex-trading")
-slack_client = None
-
-if SLACK_SDK_AVAILABLE and SLACK_TOKEN:
-    try:
-        slack_client = WebClient(token=SLACK_TOKEN)
-        # Test connection
-        slack_client.auth_test()
-        print(f"✅ Slack connected to channel: {SLACK_CHANNEL}")
-    except Exception as e:
-        print(f"⚠️ Slack connection failed: {e}")
-        slack_client = None
-elif not SLACK_TOKEN:
-    print("⚠️ SLACK_BOT_TOKEN not set - Slack notifications disabled")
+if SLACK_WEBHOOK_URL:
+    print(f"✅ Slack webhook configured")
+else:
+    print("⚠️ SLACK_WEBHOOK_URL not set - Slack notifications disabled")
 
 
 def read_trades_csv(csv_path="rex_trades.csv"):
@@ -271,36 +256,78 @@ def format_summary_message(summary_data, ai_summary=None):
 
 
 def send_slack_message(message, channel=None):
-    """Send a text message to Slack."""
-    if not SLACK_SDK_AVAILABLE:
-        print("⚠️ slack-sdk not installed - message not sent")
+    """Send a text message to Slack via webhook."""
+    if not SLACK_WEBHOOK_URL:
+        print("⚠️ Slack webhook not configured - message not sent")
         return False
-    if not slack_client:
-        print("⚠️ Slack not configured - message not sent")
-        return False
-    
-    channel = channel or SLACK_CHANNEL
     
     try:
-        response = slack_client.chat_postMessage(
-            channel=channel,
-            text=message,
-            mrkdwn=True
+        payload = {
+            "text": message
+        }
+        
+        response = requests.post(
+            SLACK_WEBHOOK_URL,
+            json=payload,
+            timeout=10
         )
-        print(f"✅ Slack message sent to {channel}")
-        return True
-    except SlackApiError as e:
-        print(f"❌ Slack API error: {e.response['error']}")
+        
+        if response.status_code == 200:
+            print(f"✅ Slack message sent")
+            return True
+        else:
+            print(f"❌ Slack webhook error: {response.status_code} - {response.text}")
+            return False
+            
+    except Exception as e:
+        print(f"❌ Slack webhook error: {e}")
         return False
+
+
+def send_session_notification(old_session, new_session, timestamp=None):
+    """
+    Send a simple Slack notification when trading session changes.
+    
+    Args:
+        old_session: Previous session name (e.g., "LONDON")
+        new_session: New session name (e.g., "US_OVERLAP")
+        timestamp: datetime object (optional)
+    """
+    if not SLACK_WEBHOOK_URL:
+        return False
+    
+    if timestamp is None:
+        from datetime import datetime
+        timestamp = datetime.now()
+    
+    time_str = timestamp.strftime("%H:%M UTC")
+    
+    # Session emojis
+    session_emojis = {
+        "ASIAN": "🌏",
+        "LONDON": "🇬🇧",
+        "US_OVERLAP": "🌎",
+        "US": "🇺🇸",
+        "LATE_US": "🌙"
+    }
+    
+    old_emoji = session_emojis.get(old_session, "📊")
+    new_emoji = session_emojis.get(new_session, "📊")
+    
+    message = f"{new_emoji} *{new_session} SESSION STARTED*\n"
+    message += f"Time: {time_str}\n"
+    message += f"Previous: {old_session} → Current: {new_session}"
+    
+    return send_slack_message(message)
 
 
 def upload_csv_to_slack(csv_path="rex_trades.csv", channel=None):
-    """Upload CSV file to Slack."""
-    if not SLACK_SDK_AVAILABLE:
-        print("⚠️ slack-sdk not installed - CSV not uploaded")
-        return False
-    if not slack_client:
-        print("⚠️ Slack not configured - CSV not uploaded")
+    """
+    Send CSV content to Slack via webhook.
+    Note: Webhooks can't upload files directly, so we send it as a code block.
+    """
+    if not SLACK_WEBHOOK_URL:
+        print("⚠️ Slack webhook not configured - CSV not sent")
         return False
     
     csv_file = Path(__file__).parent / csv_path
@@ -309,19 +336,19 @@ def upload_csv_to_slack(csv_path="rex_trades.csv", channel=None):
         print(f"⚠️ CSV file not found: {csv_file}")
         return False
     
-    channel = channel or SLACK_CHANNEL
-    
     try:
-        response = slack_client.files_upload_v2(
-            channel=channel,
-            file=str(csv_file),
-            title=f"Rex Trades - {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-            initial_comment="📎 Complete trade history CSV"
-        )
-        print(f"✅ CSV uploaded to {channel}")
-        return True
-    except SlackApiError as e:
-        print(f"❌ Slack upload error: {e.response['error']}")
+        # Read CSV content
+        with open(csv_file, 'r', encoding='utf-8', errors='replace') as f:
+            csv_content = f.read()
+        
+        # Send as code block (webhooks don't support file uploads)
+        message = f"📎 *Rex Trades CSV - {datetime.now().strftime('%Y-%m-%d %H:%M')}*\n"
+        message += f"```\n{csv_content}\n```"
+        
+        return send_slack_message(message)
+        
+    except Exception as e:
+        print(f"❌ CSV send error: {e}")
         return False
 
 
@@ -331,14 +358,11 @@ def send_hourly_summary(csv_path="rex_trades.csv", channel=None, include_ai=True
     
     Args:
         csv_path: Path to trades CSV file
-        channel: Slack channel (defaults to SLACK_CHANNEL env var)
+        channel: Slack channel (for display only, webhooks post to configured channel)
         include_ai: Whether to include AI-generated analysis
     """
-    if not SLACK_SDK_AVAILABLE:
-        print("⚠️ slack-sdk not installed - summary not sent")
-        return False
-    if not slack_client:
-        print("⚠️ Slack not configured - summary not sent")
+    if not SLACK_WEBHOOK_URL:
+        print("⚠️ Slack webhook not configured - summary not sent")
         return False
     
     # Read trades
