@@ -37,7 +37,7 @@ elif not SLACK_TOKEN:
 def read_trades_csv(csv_path="rex_trades.csv"):
     """Read trades from CSV file.
     
-    CSV format: TradeID, Time, Type, Symbol, Entry, SL, TP, Status, ExitPrice, PnL, Reason
+    CSV format: TradeID, Time, Session, Type, Symbol, Entry, SL, TP, Status, ExitPrice, PnL, Reason
     """
     trades = []
     csv_file = Path(__file__).parent / csv_path
@@ -46,7 +46,7 @@ def read_trades_csv(csv_path="rex_trades.csv"):
         return trades
     
     try:
-        with open(csv_file, 'r') as f:
+        with open(csv_file, 'r', encoding='utf-8', errors='replace') as f:
             reader = csv.DictReader(f)
             for row in reader:
                 # Skip empty rows or rows without TradeID
@@ -71,12 +71,16 @@ def calculate_pnl_summary(trades):
             "avg_loss": 0,
             "largest_win": 0,
             "largest_loss": 0,
-            "profit_factor": 0
+            "profit_factor": 0,
+            "session_breakdown": {}
         }
     
     wins = []
     losses = []
     total_pnl = 0
+    
+    # v10: Session breakdown
+    session_stats = {}
     
     for trade in trades:
         try:
@@ -91,6 +95,16 @@ def calculate_pnl_summary(trades):
                 wins.append(pnl)
             elif pnl < 0:
                 losses.append(abs(pnl))
+            
+            # v10: Track session stats
+            session = trade.get('Session', 'UNKNOWN')
+            if session not in session_stats:
+                session_stats[session] = {'trades': 0, 'wins': 0, 'pnl': 0}
+            session_stats[session]['trades'] += 1
+            session_stats[session]['pnl'] += pnl
+            if pnl > 0:
+                session_stats[session]['wins'] += 1
+                
         except (ValueError, TypeError) as e:
             continue
     
@@ -121,7 +135,8 @@ def calculate_pnl_summary(trades):
         "largest_loss": largest_loss,
         "profit_factor": profit_factor,
         "total_wins_amount": total_wins,
-        "total_losses_amount": total_losses
+        "total_losses_amount": total_losses,
+        "session_breakdown": session_stats
     }
 
 
@@ -238,6 +253,16 @@ def format_summary_message(summary_data, ai_summary=None):
 • Total Wins: ${summary_data['total_wins_amount']:.2f}
 • Total Losses: ${summary_data['total_losses_amount']:.2f}
 """
+    
+    # v10: Add session breakdown
+    session_stats = summary_data.get('session_breakdown', {})
+    if session_stats:
+        message += "\n*🌍 SESSION BREAKDOWN:*\n"
+        for session, stats in session_stats.items():
+            if stats['trades'] > 0:
+                win_rate = (stats['wins'] / stats['trades'] * 100)
+                pnl_emoji = "🟢" if stats['pnl'] > 0 else "🔴" if stats['pnl'] < 0 else "🟡"
+                message += f"• {session}: {stats['trades']} trades | {win_rate:.0f}% win | {pnl_emoji} ${stats['pnl']:.2f}\n"
     
     if ai_summary:
         message += f"\n*🤖 AI Analysis:*\n{ai_summary}\n"

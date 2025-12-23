@@ -57,15 +57,15 @@ OPENAI_API_KEY=sk-proj-your-openai-key-here
 
 ## What Each Variable Does
 
-| Variable | Required | Purpose |
-|----------|----------|---------|
-| `TIINGO_KEY` | ✅ Yes | Real-time gold price data via WebSocket |
-| `MT5_API_BASE_URL` | ✅ Yes | MT5 API endpoint for trade execution |
-| `REX_LIVE_TRADING` | ⚠️ Optional | Enable live trading (default: false) |
-| `MT5_VOLUME` | ⚠️ Optional | Trade size in lots (default: 0.01) |
-| `SLACK_BOT_TOKEN` | ⚠️ Optional | Slack bot token for notifications |
-| `SLACK_CHANNEL` | ⚠️ Optional | Slack channel name (default: #rex-trading) |
-| `OPENAI_API_KEY` | ⚠️ Optional | AI summaries in Slack (default: disabled) |
+| Variable           | Required   | Purpose                                    |
+| ------------------ | ---------- | ------------------------------------------ |
+| `TIINGO_KEY`       | ✅ Yes      | Real-time gold price data via WebSocket    |
+| `MT5_API_BASE_URL` | ✅ Yes      | MT5 API endpoint for trade execution       |
+| `REX_LIVE_TRADING` | ⚠️ Optional | Enable live trading (default: false)       |
+| `MT5_VOLUME`       | ⚠️ Optional | Trade size in lots (default: 0.01)         |
+| `SLACK_BOT_TOKEN`  | ⚠️ Optional | Slack bot token for notifications          |
+| `SLACK_CHANNEL`    | ⚠️ Optional | Slack channel name (default: #rex-trading) |
+| `OPENAI_API_KEY`   | ⚠️ Optional | AI summaries in Slack (default: disabled)  |
 
 ## Setup Instructions
 
