@@ -75,11 +75,18 @@ If 15m moved -$3.00 or more (strong dump):
 - SELL when: 1H BEARISH + 5m/15m BEARISH + momentum ACCELERATING_DOWN
 - These are HIGH confidence trades (8-10)
 
+**COUNTER-TREND REDUCTION (v10.1):**
+- When 1H is BEARISH: REDUCE SELL trades - prefer WAIT or BUY (only sell if very strong bearish alignment)
+- When 1H is BULLISH: REDUCE BUY trades - prefer WAIT or SELL (only buy if very strong bullish alignment)
+- Counter-trend trades should have LOWER confidence (4-6) and require exceptional alignment
+- With-trend trades (BUY in BULLISH, SELL in BEARISH) are preferred but still need alignment
+
 **WAIT when:**
 - 1H trend conflicts with 5m+15m trend (e.g., 1H BEARISH but 5m+15m BULLISH)
 - Momentum is ACCELERATING opposite to intended trade
 - Structure shows "Volatile" or "Expanding"
 - 1H is NEUTRAL AND 15m is NEUTRAL
+- Counter-trend trade without exceptional alignment (e.g., SELL in BEARISH 1H without strong bearish confirmation)
 
 ===== CRITICAL RULES =====
 1. NEVER trade against strong recent momentum ($3+ move in 15min)

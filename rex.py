@@ -109,8 +109,16 @@ def connect_websocket():
     global ws
     attempts = 0
     
-    # v10: Get enabled tickers (default to just active pair for single-pair mode)
-    tickers = [ACTIVE_PAIR] if os.getenv("REX_SINGLE_PAIR", "true").lower() == "true" else get_enabled_tickers()
+    # v10.1: Get enabled tickers (default to all enabled pairs for multi-currency support)
+    single_pair_mode = os.getenv("REX_SINGLE_PAIR", "false").lower() == "true"
+    if single_pair_mode:
+        tickers = [ACTIVE_PAIR]
+    else:
+        # Subscribe to all enabled pairs
+        tickers = get_enabled_tickers()
+        if not tickers:
+            # Fallback to active pair if no enabled pairs found
+            tickers = [ACTIVE_PAIR]
     
     while attempts < MAX_RECONNECT_ATTEMPTS:
         try:
