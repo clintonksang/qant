@@ -4,10 +4,15 @@ import datetime, os, time, ssl, csv, pickle
 from pathlib import Path
 import brain, execution
 import pattern_learner  # Pattern learning agent
+import rex_mt5_executor  # v8: Live MT5 trading
 
 # Initialize
 TIINGO_KEY = os.getenv("TIINGO_KEY")
 ws = None  # Will be initialized by connect_websocket()
+
+# v8: LIVE TRADING CONFIG
+LIVE_TRADING = os.getenv("REX_LIVE_TRADING", "true").lower() == "true"
+mt5 = None  # MT5 executor instance
 
 # v7.2: STATE PERSISTENCE - Survive network disconnects
 STATE_FILE = Path(__file__).parent / ".rex_state.pkl"
@@ -833,7 +838,7 @@ def update_trade_in_csv(trade_id, status, exit_price, pnl, reason):
         csv.writer(f).writerows(rows)
 
 def open_trade(side, entry_price, timestamp, trend_analysis, rsi, sma, detected_patterns=None):
-    global active_trades, last_trade_time
+    global active_trades, last_trade_time, mt5
     trade_id = int(time.time() * 100) % 10000000000
     last_trade_time = time.time()  # Record trade time for cooldown
     
@@ -843,6 +848,17 @@ def open_trade(side, entry_price, timestamp, trend_analysis, rsi, sma, detected_
     else:  # SELL
         sl = entry_price + SL_PIPS
         tp = entry_price - TP_PIPS
+    
+    # v8: EXECUTE ON MT5
+    mt5_ticket = None
+    actual_entry = entry_price
+    if LIVE_TRADING and mt5:
+        result = mt5.open_trade(side, sl, tp, comment="REX")
+        if result['success']:
+            mt5_ticket = result['ticket']
+            actual_entry = result['entry_price']
+        else:
+            print(f"   ⚠️ MT5 failed: {result.get('error')} - Paper only")
     
     # Get market context for learning
     hour_utc = timestamp.hour
@@ -855,11 +871,13 @@ def open_trade(side, entry_price, timestamp, trend_analysis, rsi, sma, detected_
     new_trade = {
         "id": trade_id,
         "side": side,
-        "entry": entry_price,
+        "entry": actual_entry,  # v8: Use MT5 price if available
         "sl": sl,
         "tp": tp,
         "time": timestamp,
         "open_timestamp": time.time(),  # For hold time calculation
+        "mt5_ticket": mt5_ticket,  # v8: MT5 ticket for live trades
+        "is_live": mt5_ticket is not None,  # v8: Track if live
         
         # Store FULL context for learning when trade closes
         "entry_candles": candles_history.copy()[-20:] if len(candles_history) >= 20 else candles_history.copy(),
@@ -901,8 +919,11 @@ def open_trade(side, entry_price, timestamp, trend_analysis, rsi, sma, detected_
     
     # Enhanced logging
     rr_ratio = TP_PIPS / SL_PIPS
+    live_tag = " 🔥LIVE" if mt5_ticket else " 📝PAPER"
     print(f"\n{'='*60}")
-    print(f"📈 OPENED {side} #{len(active_trades)} @ {entry_price:.2f}")
+    print(f"📈 OPENED {side}{live_tag} #{len(active_trades)} @ {actual_entry:.2f}")
+    if mt5_ticket:
+        print(f"   🎫 MT5 Ticket: #{mt5_ticket}")
     print(f"   SL: {sl:.2f} | TP: {tp:.2f} | R:R 1:{rr_ratio:.1f}")
     print(f"   🔒 Trail at +${TRAILING_TRIGGER} | ⏱️ Max hold: {MAX_HOLD_MINUTES}min")
     print(f"   Session: {session} | Entry: {price_action_type}")
@@ -916,7 +937,7 @@ def open_trade(side, entry_price, timestamp, trend_analysis, rsi, sma, detected_
 
 def check_trade_exit(current_price):
     """Check if any active trades hit SL or TP, with trailing stop and time exit."""
-    global active_trades, consecutive_losses
+    global active_trades, consecutive_losses, mt5
     trades_to_close = []
     
     for trade in active_trades:
@@ -924,6 +945,8 @@ def check_trade_exit(current_price):
         entry = trade["entry"]
         sl = trade["sl"]
         tp = trade["tp"]
+        mt5_ticket = trade.get("mt5_ticket")
+        is_live = trade.get("is_live", False)
         
         exit_reason = None
         exit_price = None
@@ -934,17 +957,22 @@ def check_trade_exit(current_price):
         else:
             current_pnl = entry - current_price
         
-        # === TRAILING STOP LOGIC ===
+        hold_minutes = (time.time() - trade.get("open_timestamp", time.time())) / 60
+        
+        # === v8: DYNAMIC SL - RUN WITH WINNERS ===
+        sl_updated = False
+        
+        # 1. FULL TRAILING: +$1.80 profit - trail aggressively
         if current_pnl >= TRAILING_TRIGGER:
-            # Move SL to breakeven + buffer, then trail
             if side == "BUY":
                 new_sl = entry + BREAKEVEN_BUFFER + ((current_pnl - TRAILING_TRIGGER) // TRAILING_STEP) * TRAILING_STEP
                 if new_sl > trade["sl"]:
                     old_sl = trade["sl"]
                     trade["sl"] = new_sl
                     sl = new_sl
+                    sl_updated = True
                     if not trade.get("trailing_logged"):
-                        print(f"\n🔒 TRAILING: {side} SL moved {old_sl:.2f} → {new_sl:.2f} (locking ${current_pnl:.2f} profit)")
+                        print(f"\n📈 TRAILING: SL {old_sl:.2f} → {new_sl:.2f} (lock ${new_sl - entry:.2f})")
                         trade["trailing_logged"] = True
             else:  # SELL
                 new_sl = entry - BREAKEVEN_BUFFER - ((current_pnl - TRAILING_TRIGGER) // TRAILING_STEP) * TRAILING_STEP
@@ -952,15 +980,45 @@ def check_trade_exit(current_price):
                     old_sl = trade["sl"]
                     trade["sl"] = new_sl
                     sl = new_sl
+                    sl_updated = True
                     if not trade.get("trailing_logged"):
-                        print(f"\n🔒 TRAILING: {side} SL moved {old_sl:.2f} → {new_sl:.2f} (locking ${current_pnl:.2f} profit)")
+                        print(f"\n📈 TRAILING: SL {old_sl:.2f} → {new_sl:.2f} (lock ${entry - new_sl:.2f})")
                         trade["trailing_logged"] = True
         
-        # === TIME-BASED EXIT ===
-        hold_minutes = (time.time() - trade.get("open_timestamp", time.time())) / 60
+        # 2. v8: BREAKEVEN: +$0.50 profit - protect the win
+        elif current_pnl >= 0.50 and not trade.get("breakeven_set"):
+            if side == "BUY":
+                new_sl = entry + 0.20  # Lock $0.20 profit
+                if new_sl > trade["sl"]:
+                    old_sl = trade["sl"]
+                    trade["sl"] = new_sl
+                    sl = new_sl
+                    sl_updated = True
+                    trade["breakeven_set"] = True
+                    print(f"\n🔒 BREAKEVEN: SL {old_sl:.2f} → {new_sl:.2f} (protected)")
+            else:
+                new_sl = entry - 0.20
+                if new_sl < trade["sl"]:
+                    old_sl = trade["sl"]
+                    trade["sl"] = new_sl
+                    sl = new_sl
+                    sl_updated = True
+                    trade["breakeven_set"] = True
+                    print(f"\n🔒 BREAKEVEN: SL {old_sl:.2f} → {new_sl:.2f} (protected)")
+        
+        # v8: Update SL on MT5 if changed
+        if sl_updated and is_live and mt5 and mt5_ticket:
+            mt5.modify_sl_tp(mt5_ticket, new_sl=sl, current_tp=tp)
+        
+        # === v8: TIME EXIT - ONLY FOR LOSERS ===
         if hold_minutes >= MAX_HOLD_MINUTES:
-            exit_reason = f"TIME EXIT ({int(hold_minutes)}min)"
-            exit_price = current_price
+            if current_pnl <= 0:  # v8: Only time exit LOSERS
+                exit_reason = f"TIME EXIT ({int(hold_minutes)}min)"
+                exit_price = current_price
+            elif current_pnl > 0 and not trade.get("time_warning"):
+                # Winner at time limit - just warn, keep running with trailing SL
+                print(f"\n⏰ TIME LIMIT: +${current_pnl:.2f} profit - running with trail!")
+                trade["time_warning"] = True
         
         # === STANDARD SL/TP CHECK ===
         if exit_reason is None:
@@ -980,6 +1038,15 @@ def check_trade_exit(current_price):
                     exit_price = tp
         
         if exit_reason:
+            # v8: CLOSE ON MT5 FIRST
+            if is_live and mt5 and mt5_ticket:
+                close_result = mt5.close_trade(mt5_ticket, side)
+                if close_result['success']:
+                    exit_price = close_result.get('close_price', exit_price)
+                    print(f"   🔥 MT5 CLOSED @ {exit_price:.2f}")
+                else:
+                    print(f"   ⚠️ MT5 close failed: {close_result.get('error')}")
+            
             if side == "BUY":
                 pnl = exit_price - entry
             else:
@@ -1063,7 +1130,8 @@ def check_trade_exit(current_price):
             streak_info = f" | Losses: {consecutive_losses}" if consecutive_losses > 0 else ""
             rr_achieved = abs(pnl) / SL_PIPS
             trail_info = " (TRAILED)" if trade.get("trailing_logged") else ""
-            print(f"\n{emoji} CLOSED {side} @ {exit_price:.2f} | PnL: {pnl:+.2f} ({rr_achieved:.1f}R) | {exit_reason}{trail_info}")
+            live_tag = " 🔥LIVE" if is_live else ""
+            print(f"\n{emoji} CLOSED {side}{live_tag} @ {exit_price:.2f} | PnL: {pnl:+.2f} ({rr_achieved:.1f}R) | {exit_reason}{trail_info}")
             print(f"   Hold: {hold_time_minutes}min | Session: {trade.get('entry_session', 'N/A')}{streak_info}")
             trades_to_close.append(trade)
     
@@ -1077,14 +1145,25 @@ def check_trade_exit(current_price):
 
 init_csv()
 init_price_log()  # Initialize price movement logging
-print("🚀 Rex v7.2 (Auto-Reconnect + Fast Warmup) is Live...")
-print(f"   🎯 v7.2 FEATURES:")
+
+# v8: Initialize MT5 for live trading
+if LIVE_TRADING:
+    mt5 = rex_mt5_executor.get_executor(volume=0.01)
+    if mt5.test_connection():
+        print("🔥 LIVE TRADING ENABLED")
+    else:
+        print("⚠️ MT5 connection failed - paper trading only")
+        LIVE_TRADING = False
+        mt5 = None
+
+print("🚀 Rex v8.0 (Live MT5 + Dynamic SL) is Live...")
+print(f"   🎯 v8.0 FEATURES:")
+print(f"      - 🔥 LIVE TRADING: {'ENABLED' if LIVE_TRADING else 'DISABLED'}")
+print(f"      - 📈 RUN WITH WINNERS: Trail SL on profit, no time exit")
+print(f"      - ✂️ CUT LOSERS: Time exit only for losing trades")
 print(f"      - AUTO-RECONNECT: Survives network disconnects")
-print(f"      - STATE PERSISTENCE: Resumes with existing data (up to {STATE_MAX_AGE/60:.0f}min old)")
-print(f"      - FAST WARMUP: Only {WARMUP_CANDLES} min needed (was 15)")
-print(f"   📊 Trend-Aware Filters (v7.1):")
+print(f"   📊 Trend-Aware Filters:")
 print(f"      - RSI {RSI_OVERSOLD_DANGER}/{RSI_OVERBOUGHT_DANGER} only blocks counter-trend")
-print(f"      - TRADE WITH TREND: allowed at any RSI")
 print(f"   ⚙️ Core Settings:")
 print(f"      - MAX_TRADES: 1 | MAX_HOLD: {MAX_HOLD_MINUTES}min | COOLDOWN: {MIN_MINUTES_BETWEEN_TRADES}min")
 print(f"      - Trailing: +${TRAILING_TRIGGER} trigger, lock ${BREAKEVEN_BUFFER} minimum")
@@ -1244,11 +1323,11 @@ while True:
                     
                     # ===== MOMENTUM PROTECTION =====
                     if can_trade:
-                    momentum_blocked, momentum_reason = check_momentum_override(trade['decision'], closes)
-                    if momentum_blocked:
-                        print(f"\n{momentum_reason}")
-                        can_trade = False
-                        filter_reason = momentum_reason
+                        momentum_blocked, momentum_reason = check_momentum_override(trade['decision'], closes)
+                        if momentum_blocked:
+                            print(f"\n{momentum_reason}")
+                            can_trade = False
+                            filter_reason = momentum_reason
                     
                     # ===== SHORT-TERM TREND CONFLICT CHECK (v5: with 1m/3m ultra-short) =====
                     if can_trade:
