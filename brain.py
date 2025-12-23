@@ -77,7 +77,7 @@ If 15m moved -$3.00 or more (strong dump):
 
 **COUNTER-TREND REDUCTION (v10.1):**
 - When 1H is BEARISH: REDUCE SELL trades - prefer WAIT or BUY (only sell if very strong bearish alignment)
-- When 1H is BULLISH: REDUCE BUY trades - prefer WAIT or SELL (only buy if very strong bullish alignment)
+- For XAUUSD, don't do so sell trades at all. very important
 - Counter-trend trades should have LOWER confidence (4-6) and require exceptional alignment
 - With-trend trades (BUY in BULLISH, SELL in BEARISH) are preferred but still need alignment
 
