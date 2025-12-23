@@ -57,6 +57,9 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - REX_LIVE_TRADING=true
+      # Slack Integration (optional):
+      # - SLACK_BOT_TOKEN=xoxb-your-token-here
+      # - SLACK_CHANNEL=#rex-trading
     working_dir: /app
     command: ["python", "rex.py"]
     volumes:

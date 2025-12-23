@@ -5,6 +5,7 @@ from pathlib import Path
 import brain, execution
 import pattern_learner  # Pattern learning agent
 import rex_mt5_executor  # v8: Live MT5 trading
+import slack_notifier  # v9: Slack hourly summaries
 
 # Initialize
 TIINGO_KEY = os.getenv("TIINGO_KEY")
@@ -1237,6 +1238,16 @@ while True:
             try:
                 print("\n" + "🕔"*20)
                 execution.print_hourly_review()
+                
+                # v9: Send Slack summary
+                try:
+                    slack_notifier.send_hourly_summary(
+                        csv_path="rex_trades.csv",
+                        include_ai=True
+                    )
+                    print("✅ Slack hourly summary sent")
+                except Exception as slack_err:
+                    print(f"⚠️ Slack summary error: {slack_err}")
             except Exception as review_err:
                 print(f"\u26a0\ufe0f Hourly review error: {review_err}")
         
