@@ -15,6 +15,88 @@ ws = None  # Will be initialized by connect_websocket()
 LIVE_TRADING = os.getenv("REX_LIVE_TRADING", "true").lower() == "true"
 mt5 = None  # MT5 executor instance
 
+# ============================================================
+# v10: MULTI-CURRENCY SUPPORT
+# ============================================================
+# Each pair has its own risk parameters based on volatility
+CURRENCY_PAIRS = {
+    "xauusd": {
+        "enabled": True,
+        "mt5_symbol": "XAUUSDm",
+        "sl_pips": 2.00,      # Gold: $2 SL (200 pips)
+        "tp_pips": 6.00,      # Gold: $6 TP (3:1)
+        "pip_value": 0.01,    # Gold: 1 pip = $0.01
+        "min_volume": 0.01,
+        "description": "Gold"
+    },
+    "eurusd": {
+        "enabled": True,
+        "mt5_symbol": "EURUSDm",
+        "sl_pips": 15,        # EUR/USD: 15 pips SL
+        "tp_pips": 45,        # EUR/USD: 45 pips TP (3:1)
+        "pip_value": 0.0001,  # Standard forex pair
+        "min_volume": 0.01,
+        "description": "Euro"
+    },
+    "gbpusd": {
+        "enabled": True,
+        "mt5_symbol": "GBPUSDm",
+        "sl_pips": 20,        # GBP/USD: 20 pips SL (more volatile)
+        "tp_pips": 60,        # GBP/USD: 60 pips TP (3:1)
+        "pip_value": 0.0001,
+        "min_volume": 0.01,
+        "description": "British Pound"
+    },
+    "audusd": {
+        "enabled": True,
+        "mt5_symbol": "AUDUSDm",
+        "sl_pips": 15,        # AUD/USD: 15 pips SL
+        "tp_pips": 45,        # AUD/USD: 45 pips TP (3:1)
+        "pip_value": 0.0001,
+        "min_volume": 0.01,
+        "description": "Australian Dollar"
+    },
+    "usdchf": {
+        "enabled": True,
+        "mt5_symbol": "USDCHFm",
+        "sl_pips": 15,        # USD/CHF: 15 pips SL
+        "tp_pips": 45,        # USD/CHF: 45 pips TP (3:1)
+        "pip_value": 0.0001,
+        "min_volume": 0.01,
+        "description": "Swiss Franc"
+    },
+    "usdcad": {
+        "enabled": True,
+        "mt5_symbol": "USDCADm",
+        "sl_pips": 15,        # USD/CAD: 15 pips SL
+        "tp_pips": 45,        # USD/CAD: 45 pips TP (3:1)
+        "pip_value": 0.0001,
+        "min_volume": 0.01,
+        "description": "Canadian Dollar"
+    },
+    "nzdusd": {
+        "enabled": True,
+        "mt5_symbol": "NZDUSDm",
+        "sl_pips": 15,        # NZD/USD: 15 pips SL
+        "tp_pips": 45,        # NZD/USD: 45 pips TP (3:1)
+        "pip_value": 0.0001,
+        "min_volume": 0.01,
+        "description": "New Zealand Dollar"
+    }
+}
+
+# Get list of enabled tickers for websocket subscription
+def get_enabled_tickers():
+    """Return list of tickers to subscribe to."""
+    return [pair for pair, config in CURRENCY_PAIRS.items() if config.get("enabled", False)]
+
+# Current trading pair (for single-pair mode, default to gold)
+ACTIVE_PAIR = os.getenv("REX_ACTIVE_PAIR", "xauusd").lower()
+
+def get_pair_config(pair_name):
+    """Get configuration for a specific pair."""
+    return CURRENCY_PAIRS.get(pair_name.lower(), CURRENCY_PAIRS["xauusd"])
+
 # v7.2: STATE PERSISTENCE - Survive network disconnects
 STATE_FILE = Path(__file__).parent / ".rex_state.pkl"
 STATE_MAX_AGE = 300  # 5 minutes - if state is older, start fresh
@@ -27,9 +109,13 @@ def connect_websocket():
     global ws
     attempts = 0
     
+    # v10: Get enabled tickers (default to just active pair for single-pair mode)
+    tickers = [ACTIVE_PAIR] if os.getenv("REX_SINGLE_PAIR", "true").lower() == "true" else get_enabled_tickers()
+    
     while attempts < MAX_RECONNECT_ATTEMPTS:
         try:
-            print(f"\n🔌 Connecting to Tiingo websocket (attempt {attempts + 1}/{MAX_RECONNECT_ATTEMPTS})...")
+            print(f"\n[CONNECT] Connecting to Tiingo websocket (attempt {attempts + 1}/{MAX_RECONNECT_ATTEMPTS})...")
+            print(f"   Subscribing to: {', '.join(tickers)}")
             ws = create_connection(
                 "wss://api.tiingo.com/fx", 
                 sslopt={"cert_reqs": ssl.CERT_NONE},
@@ -38,13 +124,13 @@ def connect_websocket():
             ws.send(json.dumps({
                 'eventName': 'subscribe', 
                 'authorization': TIINGO_KEY, 
-                'eventData': {'tickers': ["xauusd"]}
+                'eventData': {'tickers': tickers}
             }))
-            print("✅ Websocket connected!")
+            print("[OK] Websocket connected!")
             return True
         except Exception as e:
             attempts += 1
-            print(f"❌ Connection failed: {e}")
+            print(f"[ERR] Connection failed: {e}")
             if attempts < MAX_RECONNECT_ATTEMPTS:
                 print(f"   Retrying in {RECONNECT_DELAY} seconds...")
                 time.sleep(RECONNECT_DELAY)
@@ -125,28 +211,30 @@ def load_state():
 # FAST SCALPING CONFIG - Tuned for quick trend captures
 # ============================================================
 # v9: 3:1 RISK/REWARD - Profitable at 25% win rate!
-# Before: SL $2.00 / TP $2.50 = 1.25:1 R:R (need 45% win rate)
-# Now:    SL $2.00 / TP $6.00 = 3:1 R:R (need 25% win rate)
+# v10: Now uses pair-specific config from CURRENCY_PAIRS
 # ============================================================
 
-# Risk Parameters - 3:1 RISK/REWARD
-SL_PIPS = 2.00  # Stop Loss in dollars (risk per trade)
-TP_PIPS = 6.00  # Take Profit = 3x SL = $6.00 (3:1 R:R)
+# v10: Get SL/TP from active pair config (dynamic based on pair)
+_pair_config = get_pair_config(ACTIVE_PAIR)
+SL_PIPS = _pair_config["sl_pips"]  # Risk per trade (pair-specific)
+TP_PIPS = _pair_config["tp_pips"]  # Reward per trade (3:1 ratio)
+CURRENT_SYMBOL = _pair_config["mt5_symbol"]  # MT5 symbol for execution
+
 MAX_TRADES = 1  # Only 1 trade at a time
 MAX_CONSECUTIVE_LOSSES = 3  # Pause trading after 3 losses
 MIN_MINUTES_BETWEEN_TRADES = 5  # Quality over quantity
 
 # v9: TP EXTENSION - When near TP, extend instead of closing!
-# Why? Your trades #7,11,12,13 all hit TP exactly, then price continued moving
-TP_EXTENSION_THRESHOLD = 0.85  # When at 85% of TP ($5.10 profit), extend!
-TP_EXTENSION_AMOUNT = 3.00     # Extend TP by $3.00 more (9R total potential)
-TP_EXTENSION_LOCK = 4.00       # Lock in $4.00 profit (2R guaranteed) when extending
+# Scales with the pair's TP size
+TP_EXTENSION_THRESHOLD = 0.85  # When at 85% of TP, extend!
+TP_EXTENSION_AMOUNT = SL_PIPS * 1.5  # Extend by 1.5x SL (e.g., $3 for gold)
+TP_EXTENSION_LOCK = SL_PIPS * 2.0    # Lock 2R profit when extending
 
 # Trailing Stop Parameters (kicks in at 1R profit)
-TRAILING_TRIGGER = 2.00  # When up $2.00 (1R), start trailing
-TRAILING_STEP = 0.50     # Trail SL by $0.50 increments
-MAX_HOLD_MINUTES = 15    # v9: Longer hold for 3:1 targets (was 8)
-BREAKEVEN_BUFFER = 1.00  # Lock in $1.00 minimum when trailing starts
+TRAILING_TRIGGER = SL_PIPS  # When up 1R, start trailing
+TRAILING_STEP = SL_PIPS * 0.25  # Trail in 0.25R increments
+MAX_HOLD_MINUTES = 15  # v9: Longer hold for 3:1 targets
+BREAKEVEN_BUFFER = SL_PIPS * 0.5  # Lock 0.5R minimum when trailing starts
 
 # v6: EXHAUSTION PROTECTION - Don't trade after massive moves
 EXHAUSTION_THRESHOLD = 20.0   # If price moved $20+ in 10min, market is exhausted
@@ -814,7 +902,7 @@ def check_filters(side, price, sma, rsi, timestamp):
 
 # CSV Setup
 CSV_FILE = Path(__file__).parent / "rex_trades.csv"
-CSV_HEADERS = ["TradeID", "Time", "Type", "Symbol", "Entry", "SL", "TP", "Status", "ExitPrice", "PnL", "Reason"]
+CSV_HEADERS = ["TradeID", "Time", "Session", "Type", "Symbol", "Entry", "SL", "TP", "Status", "ExitPrice", "PnL", "Reason"]
 
 def init_csv():
     if not CSV_FILE.exists():
@@ -833,10 +921,11 @@ def update_trade_in_csv(trade_id, status, exit_price, pnl, reason):
     
     for row in rows:
         if row[0] == str(trade_id):
-            row[7] = status
-            row[8] = f"{exit_price:.2f}"
-            row[9] = f"{pnl:.2f}"
-            row[10] = reason
+            # Updated indices for new Session column
+            row[8] = status      # Status (was 7)
+            row[9] = f"{exit_price:.2f}"   # ExitPrice (was 8)
+            row[10] = f"{pnl:.2f}"         # PnL (was 9)
+            row[11] = reason               # Reason (was 10)
             break
     
     with open(CSV_FILE, 'w', newline='') as f:
@@ -879,7 +968,9 @@ def open_trade(side, entry_price, timestamp, trend_analysis, rsi, sma, detected_
         "entry": actual_entry,  # v8: Use MT5 price if available
         "sl": sl,
         "tp": tp,
-        "original_tp_distance": TP_PIPS,  # v9: For TP extension calculation
+        # v9: Store original risk & target distance so learning/R:R stays correct
+        "original_tp_distance": TP_PIPS,
+        "original_risk": SL_PIPS,
         "time": timestamp,
         "open_timestamp": time.time(),  # For hold time calculation
         "mt5_ticket": mt5_ticket,  # v8: MT5 ticket for live trades
@@ -911,6 +1002,7 @@ def open_trade(side, entry_price, timestamp, trend_analysis, rsi, sma, detected_
     trade_row = [
         trade_id,
         timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+        session,  # v10: Added session column (LONDON, US, ASIAN, etc.)
         side,
         "xauusd",
         f"{entry_price:.2f}",
@@ -1063,14 +1155,25 @@ def check_trade_exit(current_price):
         if exit_reason is None:
             if side == "BUY":
                 if current_price <= sl:
-                    exit_reason = "TRAILING SL" if trade.get("trailing_logged") else "SL HIT"
+                    # Distinguish between full SL, breakeven SL, and trailing SL
+                    if trade.get("trailing_logged"):
+                        exit_reason = "TRAILING SL"
+                    elif trade.get("breakeven_set"):
+                        exit_reason = "BREAKEVEN SL"
+                    else:
+                        exit_reason = "SL HIT"
                     exit_price = sl
                 elif current_price >= tp:
                     exit_reason = "TP HIT"
                     exit_price = tp
             else:  # SELL
                 if current_price >= sl:
-                    exit_reason = "TRAILING SL" if trade.get("trailing_logged") else "SL HIT"
+                    if trade.get("trailing_logged"):
+                        exit_reason = "TRAILING SL"
+                    elif trade.get("breakeven_set"):
+                        exit_reason = "BREAKEVEN SL"
+                    else:
+                        exit_reason = "SL HIT"
                     exit_price = sl
                 elif current_price <= tp:
                     exit_reason = "TP HIT"
@@ -1109,6 +1212,8 @@ def check_trade_exit(current_price):
             
             # === ENHANCED LEARNING: Save comprehensive trade data ===
             try:
+                # Use original_risk for correct R:R in learning (not the moved SL)
+                original_risk = trade.get("original_risk", SL_PIPS)
                 execution.save_trade_enhanced(
                     trade_id=trade["id"],
                     side=side,
@@ -1144,7 +1249,8 @@ def check_trade_exit(current_price):
                     # Trade metrics
                     hold_time_minutes=hold_time_minutes,
                     price_change_5m=entry_trend.get("short_change", 0),
-                    price_change_15m=entry_trend.get("medium_change", 0)
+                    price_change_15m=entry_trend.get("medium_change", 0),
+                    risk_override=original_risk
                 )
             except Exception as save_err:
                 print(f"⚠️ Enhanced save error: {save_err}")
@@ -1195,16 +1301,24 @@ if LIVE_TRADING:
         LIVE_TRADING = False
         mt5 = None
 
-print("🚀 Rex v9.0 (3:1 R:R + TP Extension) is Live...")
-print(f"   🎯 v9.0 NEW FEATURES:")
-print(f"      - 📊 3:1 R:R: SL ${SL_PIPS} / TP ${TP_PIPS} (profitable at 25% win rate)")
-print(f"      - 🚀 TP EXTENSION: At {TP_EXTENSION_THRESHOLD*100:.0f}% TP, extend by ${TP_EXTENSION_AMOUNT} & lock ${TP_EXTENSION_LOCK}")
-print(f"      - 🔥 LIVE TRADING: {'ENABLED' if LIVE_TRADING else 'DISABLED'}")
-print(f"      - 📈 RUN WITH WINNERS: Trail SL, extend TP, never time-exit winners")
-print(f"      - ✂️ CUT LOSERS: Time exit only for losing trades")
-print(f"   ⚙️ Settings:")
+print("="*60)
+print("REX v10.0 - Multi-Currency Scalping Bot")
+print("="*60)
+print(f"   ACTIVE PAIR: {ACTIVE_PAIR.upper()} ({_pair_config['description']})")
+print(f"   MT5 SYMBOL:  {CURRENT_SYMBOL}")
+print(f"   RISK/REWARD: SL {SL_PIPS} / TP {TP_PIPS} (3:1 ratio)")
+print(f"   LIVE TRADING: {'ENABLED' if LIVE_TRADING else 'DISABLED'}")
+print(f"   ")
+print(f"   AVAILABLE PAIRS:")
+for pair, cfg in CURRENCY_PAIRS.items():
+    status = "[ON]" if cfg.get("enabled") else "[OFF]"
+    print(f"      {status} {pair.upper()}: {cfg['description']} (SL:{cfg['sl_pips']} TP:{cfg['tp_pips']})")
+print(f"   ")
+print(f"   SETTINGS:")
 print(f"      - MAX_HOLD: {MAX_HOLD_MINUTES}min | COOLDOWN: {MIN_MINUTES_BETWEEN_TRADES}min")
-print(f"      - Trailing: +${TRAILING_TRIGGER} trigger, +${TRAILING_STEP} steps")
+print(f"      - Trailing: +{TRAILING_TRIGGER} trigger | +{TRAILING_STEP} steps")
+print(f"      - TP Extension: at {TP_EXTENSION_THRESHOLD*100:.0f}% TP")
+print("="*60)
 
 # v7.2: Load saved state if available (for recovery after disconnect)
 state_loaded = load_state()
@@ -1236,8 +1350,15 @@ while True:
         if timestamp.hour != current_hour:
             current_hour = timestamp.hour
             try:
-                print("\n" + "🕔"*20)
-                execution.print_hourly_review()
+                print("\n" + "="*60)
+                print("HOURLY STRATEGY REVIEW")
+                print("="*60)
+                
+                # Try hourly review with encoding safety
+                try:
+                    execution.print_hourly_review()
+                except UnicodeEncodeError as enc_err:
+                    print(f"[Encoding issue in review - skipping display]")
                 
                 # v9: Send Slack summary
                 try:
@@ -1245,11 +1366,11 @@ while True:
                         csv_path="rex_trades.csv",
                         include_ai=True
                     )
-                    print("✅ Slack hourly summary sent")
+                    print("[OK] Slack hourly summary sent")
                 except Exception as slack_err:
-                    print(f"⚠️ Slack summary error: {slack_err}")
+                    print(f"[WARN] Slack summary error: {slack_err}")
             except Exception as review_err:
-                print(f"\u26a0\ufe0f Hourly review error: {review_err}")
+                print(f"[WARN] Hourly review error: {review_err}")
         
         # 3. End of Minute: Process Strategy
         if timestamp.minute != current_min:

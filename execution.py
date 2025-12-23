@@ -128,7 +128,9 @@ def save_trade_enhanced(trade_id, side, entry, exit_price, sl, tp, pnl, reason,
                         # Trade metrics
                         hold_time_minutes,
                         # Extra context
-                        price_change_5m=0, price_change_15m=0):
+                        price_change_5m=0, price_change_15m=0,
+                        # Optional override for risk used in R:R (e.g., original SL distance)
+                        risk_override=None):
     """
     COMPREHENSIVE trade storage for maximum learning.
     This stores EVERYTHING needed to understand what works.
@@ -136,7 +138,8 @@ def save_trade_enhanced(trade_id, side, entry, exit_price, sl, tp, pnl, reason,
     outcome = "WIN" if pnl > 0 else "LOSS"
     
     # Calculate Risk:Reward metrics
-    risk = abs(entry - sl)
+    # NOTE: Use risk_override when provided so R:R reflects ORIGINAL risk, not moved SL
+    risk = risk_override if risk_override is not None else abs(entry - sl)
     reward = abs(tp - entry)
     rr_ratio = reward / risk if risk > 0 else 0
     
